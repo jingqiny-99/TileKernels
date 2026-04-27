@@ -954,7 +954,12 @@ if _CUTILE_AVAILABLE:
         for tile_m in tile_ms:
             for tile_k in tile_ks:
                 for split_k in split_ks:
-                        yield {"TILE_M": tile_m, "TILE_N": TILE_N, "TILE_K": tile_k, 'SPLIT_K': split_k}
+                    yield {"TILE_M": tile_m, "TILE_N": TILE_N, "TILE_K": tile_k, 'SPLIT_K': split_k}
+
+    def _default_proj_rms_fwd_config(K, TILE_N):
+        """Static fallback for skinny MHC projection when autotune cache is absent."""
+        split_k = 16 if K >= 16384 else 8 if K >= 8192 else 1
+        return 128, TILE_N, 128, split_k
 
     # Cache the best config across calls (keyed by M, N, K).
     _proj_rms_fwd_best_cfg: dict = {}
@@ -976,7 +981,7 @@ if _CUTILE_AVAILABLE:
             if cached is not None:
                 tm, tn, tk, split_k = cached
             else:
-                tm, tn, tk, split_k = 128, TILE_N, 128, 1
+                tm, tn, tk, split_k = _default_proj_rms_fwd_config(K, TILE_N)
             
             # print(cached)
             # print('hahahahahah')
@@ -1156,7 +1161,7 @@ if _CUTILE_AVAILABLE:
             if cached is not None:
                 tm, tn, tk, split_k = cached
             else:
-                tm, tn, tk, split_k = 128, TILE_N, 128, 1
+                tm, tn, tk, split_k = _default_proj_rms_fwd_config(K, TILE_N)
 
             proj_acc = torch.empty(split_k * M, N, dtype=x.dtype, device=dev)
             norm_acc = torch.empty(split_k * M, 1, dtype=x.dtype, device=dev)

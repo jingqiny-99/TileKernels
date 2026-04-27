@@ -664,9 +664,10 @@ def _triton_matmul_norm_split_k_kernel(
     acc = tl.zeros((BLOCK_M, N_PAD), dtype=tl.float32)
     sum_sq = tl.zeros((BLOCK_M,), dtype=tl.float32)
 
-    for k_start in range(0, K, BLOCK_K):
-        k_block = k_start // BLOCK_K
-        in_split = (k_block >= first_block) & (k_block < last_block)
+    for block_offset in tl.static_range(0, blocks_per_split):
+        k_block = first_block + block_offset
+        k_start = k_block * BLOCK_K
+        in_split = k_block < last_block
         offs_k = k_start + tl.arange(0, BLOCK_K)
         mask_k = offs_k < K
         mask_mk = mask_m[:, None] & mask_k[None, :] & in_split
@@ -1021,7 +1022,7 @@ def _triton_proj_rms_compute_h_fwd(x, weight, bias, alpha_pre, alpha_post, alpha
     proj_out = torch.empty(M, N, dtype=x.dtype, device=dev)
     r = torch.empty(M, dtype=x.dtype, device=dev)
 
-    split_k = 8 if K >= 16384 else 4 if K >= 8192 else 1
+    split_k = 16 if K >= 16384 else 8 if K >= 8192 else 1
 
     if split_k == 1:
         # Kernel 1: matmul + sum_sq
