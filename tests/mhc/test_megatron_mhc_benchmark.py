@@ -22,6 +22,14 @@ def _rand(*shape: int, dtype: torch.dtype = DTYPE) -> torch.Tensor:
     return torch.empty(*shape, dtype=dtype, device=DEVICE).uniform_(-0.1, 0.1)
 
 
+def _mix_dtype(backend: str) -> torch.dtype:
+    return torch.float32 if backend == 'tilelang' else DTYPE
+
+
+def _dtype_nbytes(dtype: torch.dtype) -> int:
+    return torch.empty((), dtype=dtype).element_size()
+
+
 def _load_backend(name: str) -> dict[str, Callable]:
     if name == 'tilelang':
         pytest.importorskip('tilelang')
@@ -97,8 +105,9 @@ def test_sinkhorn_benchmark(
     del hidden
     backend_impl = _load_backend(backend)
     fn = backend_impl['sinkhorn']
-    logits = _rand(s, b, n, n)
-    grad = _rand(s, b, n, n)
+    dtype = _mix_dtype(backend)
+    logits = _rand(s, b, n, n, dtype=dtype)
+    grad = _rand(s, b, n, n, dtype=dtype)
 
     def bench_fn() -> None:
         x = logits.clone().requires_grad_()
@@ -115,7 +124,7 @@ def test_sinkhorn_benchmark(
         extras={
             'equivalence': backend_impl['equivalence']['sinkhorn'],
             'grad': 'dense',
-            'dtype': str(DTYPE).replace('torch.', ''),
+            'dtype': str(dtype).replace('torch.', ''),
         },
     )
 
@@ -135,8 +144,9 @@ def test_h_aggregate_benchmark(
 ) -> None:
     backend_impl = _load_backend(backend)
     fn = backend_impl['h_aggregate']
+    mix_dtype = _mix_dtype(backend)
     x_data = _rand(s, b, n, hidden)
-    h_data = _rand(s, b, n).sigmoid()
+    h_data = _rand(s, b, n, dtype=mix_dtype).sigmoid()
     grad = _rand(s, b, hidden)
 
     def bench_fn() -> None:
@@ -148,7 +158,7 @@ def test_h_aggregate_benchmark(
     bench_fn()
     time_us = benchmark_timer(bench_fn)
     n_tokens = s * b
-    io_bytes = n_tokens * (n * hidden * 2 + n * 2 + hidden * 2)
+    io_bytes = n_tokens * (n * hidden * 2 + n * _dtype_nbytes(mix_dtype) + hidden * 2)
     benchmark_record(
         kernel='megatron_mhc_h_aggregate',
         operation=backend,
@@ -158,7 +168,7 @@ def test_h_aggregate_benchmark(
         extras={
             'equivalence': backend_impl['equivalence']['h_aggregate'],
             'grad': 'dense',
-            'mix_dtype': str(DTYPE).replace('torch.', ''),
+            'mix_dtype': str(mix_dtype).replace('torch.', ''),
         },
     )
 
@@ -178,9 +188,10 @@ def test_h_post_bda_benchmark(
 ) -> None:
     backend_impl = _load_backend(backend)
     fn = backend_impl['h_post_bda']
-    h_res_data = _rand(s, b, n, n)
+    mix_dtype = _mix_dtype(backend)
+    h_res_data = _rand(s, b, n, n, dtype=mix_dtype)
     residual_data = _rand(s, b, n, hidden)
-    h_post_data = _rand(s, b, n).sigmoid()
+    h_post_data = _rand(s, b, n, dtype=mix_dtype).sigmoid()
     x_data = _rand(s, b, hidden)
     bias_data = _rand(hidden)
     grad = _rand(s, b, n, hidden)
@@ -197,7 +208,9 @@ def test_h_post_bda_benchmark(
     bench_fn()
     time_us = benchmark_timer(bench_fn)
     n_tokens = s * b
-    io_bytes = n_tokens * (hidden * 2 + n * hidden * 2 * 2 + n * 2 + n * n * 2)
+    io_bytes = n_tokens * (
+        hidden * 2 + n * hidden * 2 * 2 + n * _dtype_nbytes(mix_dtype) + n * n * _dtype_nbytes(mix_dtype)
+    )
     io_bytes += hidden * 2
     benchmark_record(
         kernel='megatron_mhc_h_post_bda',
@@ -208,7 +221,7 @@ def test_h_post_bda_benchmark(
         extras={
             'equivalence': backend_impl['equivalence']['h_post_bda'],
             'grad': 'dense',
-            'mix_dtype': str(DTYPE).replace('torch.', ''),
+            'mix_dtype': str(mix_dtype).replace('torch.', ''),
         },
     )
 
@@ -230,9 +243,10 @@ def test_h_post_bda_fwd_benchmark(
 ) -> None:
     backend_impl = _load_backend(backend)
     fn = backend_impl['h_post_bda']
-    h_res = _rand(s, b, n, n)
+    mix_dtype = _mix_dtype(backend)
+    h_res = _rand(s, b, n, n, dtype=mix_dtype)
     residual = _rand(s, b, n, hidden)
-    h_post = _rand(s, b, n).sigmoid()
+    h_post = _rand(s, b, n, dtype=mix_dtype).sigmoid()
     x = _rand(s, b, hidden)
     bias = _rand(hidden) if with_bias else None
 
@@ -243,7 +257,9 @@ def test_h_post_bda_fwd_benchmark(
     bench_fn()
     time_us = benchmark_timer(bench_fn)
     n_tokens = s * b
-    io_bytes = n_tokens * (hidden * 2 + n * hidden * 2 + n * 2 + n * n * 2)
+    io_bytes = n_tokens * (
+        hidden * 2 + n * hidden * 2 + n * _dtype_nbytes(mix_dtype) + n * n * _dtype_nbytes(mix_dtype)
+    )
     if with_bias:
         io_bytes += hidden * 2
     benchmark_record(
@@ -254,7 +270,7 @@ def test_h_post_bda_fwd_benchmark(
         bandwidth_gbs=io_bytes / time_us / 1e3,
         extras={
             'equivalence': backend_impl['equivalence']['h_post_bda'],
-            'mix_dtype': str(DTYPE).replace('torch.', ''),
+            'mix_dtype': str(mix_dtype).replace('torch.', ''),
         },
     )
 
