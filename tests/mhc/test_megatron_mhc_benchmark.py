@@ -8,7 +8,6 @@ DEVICE = 'cuda'
 DTYPE = torch.bfloat16
 
 _CASES = [
-    (1, 1024, 4, 1280, 'tilekernels'),
     (4096, 1, 4, 7168, 'megatron'),
 ]
 
@@ -98,8 +97,8 @@ def test_sinkhorn_benchmark(
     del hidden
     backend_impl = _load_backend(backend)
     fn = backend_impl['sinkhorn']
-    logits = _rand(s, b, n, n, dtype=torch.float32)
-    grad = _rand(s, b, n, n, dtype=torch.float32)
+    logits = _rand(s, b, n, n)
+    grad = _rand(s, b, n, n)
 
     def bench_fn() -> None:
         x = logits.clone().requires_grad_()
@@ -113,7 +112,11 @@ def test_sinkhorn_benchmark(
         operation=backend,
         params={'case': case_name, 's': s, 'b': b, 'n': n},
         time_us=time_us,
-        extras={'equivalence': backend_impl['equivalence']['sinkhorn']},
+        extras={
+            'equivalence': backend_impl['equivalence']['sinkhorn'],
+            'grad': 'dense',
+            'dtype': str(DTYPE).replace('torch.', ''),
+        },
     )
 
 
@@ -133,7 +136,7 @@ def test_h_aggregate_benchmark(
     backend_impl = _load_backend(backend)
     fn = backend_impl['h_aggregate']
     x_data = _rand(s, b, n, hidden)
-    h_data = _rand(s, b, n, dtype=torch.float32).sigmoid()
+    h_data = _rand(s, b, n).sigmoid()
     grad = _rand(s, b, hidden)
 
     def bench_fn() -> None:
@@ -145,24 +148,26 @@ def test_h_aggregate_benchmark(
     bench_fn()
     time_us = benchmark_timer(bench_fn)
     n_tokens = s * b
-    io_bytes = n_tokens * (n * hidden * 2 + n * 4 + hidden * 2)
+    io_bytes = n_tokens * (n * hidden * 2 + n * 2 + hidden * 2)
     benchmark_record(
         kernel='megatron_mhc_h_aggregate',
         operation=backend,
         params={'case': case_name, 's': s, 'b': b, 'n': n, 'hidden': hidden},
         time_us=time_us,
         bandwidth_gbs=io_bytes / time_us / 1e3,
-        extras={'equivalence': backend_impl['equivalence']['h_aggregate']},
+        extras={
+            'equivalence': backend_impl['equivalence']['h_aggregate'],
+            'grad': 'dense',
+            'mix_dtype': str(DTYPE).replace('torch.', ''),
+        },
     )
 
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize('backend', ['tilelang', 'triton', 'cutile'])
-@pytest.mark.parametrize('with_bias', [False, True])
 @pytest.mark.parametrize('s,b,n,hidden,case_name', _CASES)
 def test_h_post_bda_benchmark(
     backend: str,
-    with_bias: bool,
     s: int,
     b: int,
     n: int,
@@ -173,11 +178,11 @@ def test_h_post_bda_benchmark(
 ) -> None:
     backend_impl = _load_backend(backend)
     fn = backend_impl['h_post_bda']
-    h_res_data = _rand(s, b, n, n, dtype=torch.float32)
+    h_res_data = _rand(s, b, n, n)
     residual_data = _rand(s, b, n, hidden)
-    h_post_data = _rand(s, b, n, dtype=torch.float32).sigmoid()
+    h_post_data = _rand(s, b, n).sigmoid()
     x_data = _rand(s, b, hidden)
-    bias_data = _rand(hidden) if with_bias else None
+    bias_data = _rand(hidden)
     grad = _rand(s, b, n, hidden)
 
     def bench_fn() -> None:
@@ -192,16 +197,104 @@ def test_h_post_bda_benchmark(
     bench_fn()
     time_us = benchmark_timer(bench_fn)
     n_tokens = s * b
-    io_bytes = n_tokens * (hidden * 2 + n * hidden * 2 * 2 + n * 4 + n * n * 4)
+    io_bytes = n_tokens * (hidden * 2 + n * hidden * 2 * 2 + n * 2 + n * n * 2)
+    io_bytes += hidden * 2
+    benchmark_record(
+        kernel='megatron_mhc_h_post_bda',
+        operation=backend,
+        params={'case': case_name, 'bias': True, 's': s, 'b': b, 'n': n, 'hidden': hidden},
+        time_us=time_us,
+        bandwidth_gbs=io_bytes / time_us / 1e3,
+        extras={
+            'equivalence': backend_impl['equivalence']['h_post_bda'],
+            'grad': 'dense',
+            'mix_dtype': str(DTYPE).replace('torch.', ''),
+        },
+    )
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize('backend', ['tilelang', 'triton', 'cutile'])
+@pytest.mark.parametrize('with_bias', [False, True], ids=['no_bias', 'bias'])
+@pytest.mark.parametrize('s,b,n,hidden,case_name', _CASES)
+def test_h_post_bda_fwd_benchmark(
+    backend: str,
+    with_bias: bool,
+    s: int,
+    b: int,
+    n: int,
+    hidden: int,
+    case_name: str,
+    benchmark_record,
+    benchmark_timer,
+) -> None:
+    backend_impl = _load_backend(backend)
+    fn = backend_impl['h_post_bda']
+    h_res = _rand(s, b, n, n)
+    residual = _rand(s, b, n, hidden)
+    h_post = _rand(s, b, n).sigmoid()
+    x = _rand(s, b, hidden)
+    bias = _rand(hidden) if with_bias else None
+
+    def bench_fn() -> None:
+        with torch.no_grad():
+            fn(h_res, residual, h_post, x, bias)
+
+    bench_fn()
+    time_us = benchmark_timer(bench_fn)
+    n_tokens = s * b
+    io_bytes = n_tokens * (hidden * 2 + n * hidden * 2 + n * 2 + n * n * 2)
     if with_bias:
         io_bytes += hidden * 2
     benchmark_record(
-        kernel='megatron_mhc_h_post_bda',
+        kernel='megatron_mhc_h_post_bda_fwd',
         operation=backend,
         params={'case': case_name, 'bias': with_bias, 's': s, 'b': b, 'n': n, 'hidden': hidden},
         time_us=time_us,
         bandwidth_gbs=io_bytes / time_us / 1e3,
-        extras={'equivalence': backend_impl['equivalence']['h_post_bda']},
+        extras={
+            'equivalence': backend_impl['equivalence']['h_post_bda'],
+            'mix_dtype': str(DTYPE).replace('torch.', ''),
+        },
+    )
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize('s,b,n,hidden,case_name', _CASES)
+def test_h_post_bda_megatron_unit_parity_benchmark(
+    s: int,
+    b: int,
+    n: int,
+    hidden: int,
+    case_name: str,
+    benchmark_record,
+    benchmark_timer,
+) -> None:
+    backend_impl = _load_backend('cutile')
+    fn = backend_impl['h_post_bda']
+
+    def bench_fn() -> None:
+        h_res = _rand(s, b, n, n).requires_grad_()
+        residual = _rand(s, b, n, hidden).requires_grad_()
+        h_post = _rand(s, b, n).requires_grad_()
+        x = _rand(s, b, hidden).requires_grad_()
+        out = fn(h_res, residual, h_post, x, None)
+        out.sum().backward()
+
+    bench_fn()
+    time_us = benchmark_timer(bench_fn, warmup=10, rep=50)
+    n_tokens = s * b
+    io_bytes = n_tokens * (hidden * 2 + n * hidden * 2 * 2 + n * 2 + n * n * 2)
+    benchmark_record(
+        kernel='megatron_mhc_h_post_bda_unit_parity',
+        operation='cutile',
+        params={'case': case_name, 'bias': False, 'grad': 'sum', 's': s, 'b': b, 'n': n, 'hidden': hidden},
+        time_us=time_us,
+        bandwidth_gbs=io_bytes / time_us / 1e3,
+        extras={
+            'equivalence': 'matches Megatron-LM test_fused_mhc_kernels_bench.py',
+            'mix_dtype': str(DTYPE).replace('torch.', ''),
+        },
     )
 
 
@@ -225,10 +318,10 @@ def test_proj_rms_compute_h_benchmark(
     out_features = n * n + 2 * n
     x_data = _rand(tokens, k)
     weight_data = _rand(out_features, k)
-    alpha_pre_data = _rand(1, dtype=torch.float32)
-    alpha_post_data = _rand(1, dtype=torch.float32)
-    alpha_res_data = _rand(1, dtype=torch.float32)
-    bias_data = _rand(out_features, dtype=torch.float32)
+    alpha_pre_data = _rand(1)
+    alpha_post_data = _rand(1)
+    alpha_res_data = _rand(1)
+    bias_data = _rand(out_features)
     grad_y = _rand(tokens, out_features)
     grad_r = _rand(tokens, 1)
 
@@ -252,6 +345,63 @@ def test_proj_rms_compute_h_benchmark(
         time_us=time_us,
         extras={
             'equivalence': backend_impl['equivalence']['proj_rms_compute_h'],
+            'grad': 'dense',
+            'param_dtype': str(DTYPE).replace('torch.', ''),
+            'tflops': flops / time_us / 1e6,
+        },
+    )
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize('s,b,n,hidden,case_name', _CASES)
+def test_tilelang_prework_benchmark(
+    s: int,
+    b: int,
+    n: int,
+    hidden: int,
+    case_name: str,
+    benchmark_record,
+    benchmark_timer,
+) -> None:
+    pytest.importorskip('tilelang')
+    from tile_kernels.modeling.mhc.ops.pre_big_fuse import mhc_pre_big_fuse
+
+    tokens = s * b
+    out_features = n * n + 2 * n
+    k = n * hidden
+    residual_data = _rand(s, b, n, hidden)
+    fn_data = _rand(out_features, k, dtype=torch.float32)
+    scale_data = _rand(3, dtype=torch.float32)
+    base_data = _rand(out_features, dtype=torch.float32)
+
+    def bench_fn() -> None:
+        post_mix, comb_mix, layer_input = mhc_pre_big_fuse(
+            residual_data,
+            fn_data,
+            scale_data,
+            base_data,
+            rms_eps=1e-6,
+            mhc_pre_eps=1e-6,
+            mhc_sinkhorn_eps=1e-6,
+            mhc_post_mult_value=2.0,
+            sinkhorn_repeat=10,
+            n_splits=16,
+        )
+        assert post_mix.shape == (s, b, n, 1)
+        assert comb_mix.shape == (s, b, n, n)
+        assert layer_input.shape == (s, b, hidden)
+
+    bench_fn()
+    time_us = benchmark_timer(bench_fn)
+    flops = 2 * tokens * out_features * k
+    benchmark_record(
+        kernel='megatron_mhc_prework_fwd',
+        operation='tilelang',
+        params={'case': case_name, 'tokens': tokens, 'n': n, 'hidden': hidden},
+        time_us=time_us,
+        extras={
+            'equivalence': 'approximate-fused-forward',
+            'includes': 'proj+mapping+sinkhorn+h_aggregate',
             'tflops': flops / time_us / 1e6,
         },
     )
