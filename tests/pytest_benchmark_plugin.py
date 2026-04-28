@@ -54,6 +54,35 @@ def pytest_addoption(parser):
         default=False,
         help='Show extras columns (e.g., speedup, …) in the benchmark regression report',
     )
+    parser.addoption(
+        '--tk-bench-backend',
+        default=None,
+        help="Default tilelang do_bench backend. Defaults to 'cupti', or 'event' with --nsys-capture",
+    )
+    parser.addoption(
+        '--tk-bench-warmup',
+        type=int,
+        default=0,
+        help='Default warmup value forwarded to tilelang do_bench',
+    )
+    parser.addoption(
+        '--tk-bench-rep',
+        type=int,
+        default=30,
+        help='Default rep value forwarded to tilelang do_bench',
+    )
+    parser.addoption(
+        '--nsys-capture',
+        action='store_true',
+        default=False,
+        help='Wrap each benchmark_timer call with cudaProfilerStart/Stop for Nsight Systems capture ranges',
+    )
+    parser.addoption(
+        '--nsys-no-nvtx',
+        action='store_true',
+        default=False,
+        help='Disable NVTX ranges emitted by --nsys-capture',
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +376,24 @@ def _collect_extras_keys(results, baselines):
     return sorted(keys)
 
 
+def _call_cuda_profiler_api(fn_name):
+    """Call a CUDA profiler API function through torch's cudart binding."""
+    cudart = torch.cuda.cudart()
+    result = getattr(cudart, fn_name)()
+    status = result[0] if isinstance(result, tuple) else result
+    if status not in (None, 0):
+        raise RuntimeError(f'{fn_name} failed with CUDA error code {status}')
+
+
+def _make_nsys_range_name(request):
+    """Return a stable, compact-ish NVTX range name for the current benchmark."""
+    nodeid = request.node.nodeid.replace(os.sep, '/')
+    prefix = 'tests/'
+    if nodeid.startswith(prefix):
+        nodeid = nodeid[len(prefix):]
+    return f'benchmark:{nodeid}'
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -426,12 +473,17 @@ def benchmark_record(request):
 
 
 @pytest.fixture
-def benchmark_timer():
+def benchmark_timer(request):
     """Return a callable that measures kernel execution time in microseconds.
 
-    Wraps ``tilelang.profiler.bench.do_bench`` with CUPTI backend by default.
-    Keyword arguments are forwarded to ``do_bench``, allowing per-test
-    overrides (e.g. ``benchmark_timer(fn, rep=30)``).
+    Wraps ``tilelang.profiler.bench.do_bench`` with configurable defaults.
+    Keyword arguments are forwarded to ``do_bench`` and override CLI defaults
+    for a single call (e.g. ``benchmark_timer(fn, rep=30)``).
+
+    With ``--nsys-capture``, each timed region is wrapped in CUDA profiler API
+    start/stop calls so ``nsys profile --capture-range=cudaProfilerApi`` captures
+    only benchmark kernels. NVTX ranges are emitted by default for timeline
+    labeling and can be disabled with ``--nsys-no-nvtx``.
 
     Returns:
         A callable ``(fn, **overrides) -> float`` returning time in
@@ -439,10 +491,39 @@ def benchmark_timer():
     """
     from tilelang.profiler.bench import do_bench
 
+    nsys_capture = request.config.getoption('--nsys-capture')
+    nsys_nvtx = nsys_capture and not request.config.getoption('--nsys-no-nvtx')
+    nsys_range_name = _make_nsys_range_name(request)
+    bench_backend = request.config.getoption('--tk-bench-backend')
+    if bench_backend is None:
+        bench_backend = 'event' if nsys_capture else 'cupti'
+    bench_warmup = request.config.getoption('--tk-bench-warmup')
+    bench_rep = request.config.getoption('--tk-bench-rep')
+
     def _timer(fn, **overrides):
-        kwargs = dict(backend='cupti', warmup=0, rep=30)
+        kwargs = dict(backend=bench_backend, warmup=bench_warmup, rep=bench_rep)
         kwargs.update(overrides)
-        return do_bench(fn, **kwargs) * 1e3  # ms → us
+        if not nsys_capture:
+            return do_bench(fn, **kwargs) * 1e3  # ms → us
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        _call_cuda_profiler_api('cudaProfilerStart')
+        pushed_nvtx = False
+        try:
+            if nsys_nvtx and hasattr(torch.cuda, 'nvtx'):
+                torch.cuda.nvtx.range_push(nsys_range_name)
+                pushed_nvtx = True
+            result_ms = do_bench(fn, **kwargs)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            return result_ms * 1e3  # ms → us
+        finally:
+            try:
+                if pushed_nvtx:
+                    torch.cuda.nvtx.range_pop()
+            finally:
+                _call_cuda_profiler_api('cudaProfilerStop')
 
     return _timer
 
@@ -473,5 +554,3 @@ def _load_baselines():
             rec = json.loads(line)
             baselines[_make_key(rec)] = rec
     return baselines
-
-

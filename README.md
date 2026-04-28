@@ -47,6 +47,20 @@ pytest tests/transpose/test_transpose.py -n 4 # Correctness only with 4 workers
 pytest tests/transpose/test_transpose.py --run-benchmark # Correctness + Benchmarking
 ```
 
+### Nsight Systems benchmark capture
+
+```bash
+nsys profile --sample=none --cpuctxsw=none -t cuda-sw,nvtx \
+  --capture-range=cudaProfilerApi --capture-range-end=repeat \
+  --cuda-graph-trace=node -f true -x true -o /path/to/UT-timeline \
+  pytest tests/mhc/test_megatron_mhc_benchmark.py --run-benchmark -m benchmark --nsys-capture
+```
+
+`--nsys-capture` wraps each benchmark timing region with CUDA profiler API
+start/stop calls and emits an NVTX range for the pytest node id. Use
+`--nsys-no-nvtx` to disable NVTX labels. Timer defaults can be changed with
+`--tk-bench-backend`, `--tk-bench-warmup`, and `--tk-bench-rep`.
+
 ### Pressure test
 
 ```bash
