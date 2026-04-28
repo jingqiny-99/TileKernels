@@ -75,7 +75,13 @@ def pytest_addoption(parser):
         '--nsys-capture',
         action='store_true',
         default=False,
-        help='Wrap each benchmark_timer call with cudaProfilerStart/Stop for Nsight Systems capture ranges',
+        help='Enable Nsight Systems CUDA profiler API capture around benchmark timing',
+    )
+    parser.addoption(
+        '--nsys-capture-mode',
+        choices=('session', 'timer'),
+        default='session',
+        help="Capture mode for --nsys-capture: 'session' creates one timeline, 'timer' creates one range per benchmark_timer call",
     )
     parser.addoption(
         '--nsys-no-nvtx',
@@ -114,6 +120,7 @@ def pytest_configure(config):
     # Shared state for collecting benchmark results across this session
     config._benchmark_results = []
     config._benchmark_results_lock = threading.Lock()
+    config._nsys_session_capture_started = False
 
     # Disable warnings during benchmark setting
     if config.getoption('--run-benchmark', default=None):
@@ -182,6 +189,8 @@ def pytest_sessionfinish(session, exitstatus):
     Runs before ``pytest_terminal_summary``, so regression detection is
     performed here and stashed on ``config`` for the terminal report.
     """
+    _stop_nsys_session_capture(session.config)
+
     result = _detect_regressions(session.config)
     if result is None:
         return
@@ -385,6 +394,28 @@ def _call_cuda_profiler_api(fn_name):
         raise RuntimeError(f'{fn_name} failed with CUDA error code {status}')
 
 
+def _start_nsys_session_capture(config):
+    """Start one CUDA profiler API capture range for the pytest session."""
+    if getattr(config, '_nsys_session_capture_started', False):
+        return
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    _call_cuda_profiler_api('cudaProfilerStart')
+    config._nsys_session_capture_started = True
+
+
+def _stop_nsys_session_capture(config):
+    """Stop the session-level CUDA profiler API capture range if it is active."""
+    if not getattr(config, '_nsys_session_capture_started', False):
+        return
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+    finally:
+        _call_cuda_profiler_api('cudaProfilerStop')
+        config._nsys_session_capture_started = False
+
+
 def _make_nsys_range_name(request):
     """Return a stable, compact-ish NVTX range name for the current benchmark."""
     nodeid = request.node.nodeid.replace(os.sep, '/')
@@ -480,10 +511,12 @@ def benchmark_timer(request):
     Keyword arguments are forwarded to ``do_bench`` and override CLI defaults
     for a single call (e.g. ``benchmark_timer(fn, rep=30)``).
 
-    With ``--nsys-capture``, each timed region is wrapped in CUDA profiler API
-    start/stop calls so ``nsys profile --capture-range=cudaProfilerApi`` captures
-    only benchmark kernels. NVTX ranges are emitted by default for timeline
-    labeling and can be disabled with ``--nsys-no-nvtx``.
+    With ``--nsys-capture``, the first timed region starts a CUDA profiler API
+    capture that is stopped at pytest session finish. This creates one Nsight
+    Systems timeline for the benchmark run. Use ``--nsys-capture-mode=timer``
+    to wrap each timed region in start/stop calls instead. NVTX ranges are
+    emitted by default for timeline labeling and can be disabled with
+    ``--nsys-no-nvtx``.
 
     Returns:
         A callable ``(fn, **overrides) -> float`` returning time in
@@ -492,6 +525,7 @@ def benchmark_timer(request):
     from tilelang.profiler.bench import do_bench
 
     nsys_capture = request.config.getoption('--nsys-capture')
+    nsys_capture_mode = request.config.getoption('--nsys-capture-mode')
     nsys_nvtx = nsys_capture and not request.config.getoption('--nsys-no-nvtx')
     nsys_range_name = _make_nsys_range_name(request)
     bench_backend = request.config.getoption('--tk-bench-backend')
@@ -505,6 +539,18 @@ def benchmark_timer(request):
         kwargs.update(overrides)
         if not nsys_capture:
             return do_bench(fn, **kwargs) * 1e3  # ms → us
+
+        if nsys_capture_mode == 'session':
+            _start_nsys_session_capture(request.config)
+            pushed_nvtx = False
+            try:
+                if nsys_nvtx and hasattr(torch.cuda, 'nvtx'):
+                    torch.cuda.nvtx.range_push(nsys_range_name)
+                    pushed_nvtx = True
+                return do_bench(fn, **kwargs) * 1e3  # ms → us
+            finally:
+                if pushed_nvtx:
+                    torch.cuda.nvtx.range_pop()
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
