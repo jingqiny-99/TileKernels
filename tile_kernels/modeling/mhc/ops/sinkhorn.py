@@ -15,7 +15,7 @@ class _SinkhornNormalize(torch.autograd.Function):
         hidden_size = x.shape[1]
         output = torch.empty_like(x)
         with set_autotune_inputs(x, output):
-            fwd_kernel = _mhc_sinkhorn_fwd(hidden_size, 1, repeat, eps)
+            fwd_kernel = _mhc_sinkhorn_fwd(hidden_size, token_block_size=1, repeat=repeat, eps=eps)
         ctx.save_for_backward(x)
         ctx.repeat = repeat
         ctx.eps = eps
@@ -28,7 +28,7 @@ class _SinkhornNormalize(torch.autograd.Function):
         grad_input = torch.empty_like(x)
         hidden_size = x.shape[1]
         with set_autotune_inputs(grad_output, x, grad_input):
-            bwd_kernel = _mhc_sinkhorn_bwd(hidden_size, 32, ctx.repeat, ctx.eps)
+            bwd_kernel = _mhc_sinkhorn_bwd(hidden_size, token_block_size=32, repeat=ctx.repeat, eps=ctx.eps)
         bwd_kernel(grad_output, x, grad_input)
         return grad_input, None, None
 

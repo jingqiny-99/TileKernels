@@ -13,6 +13,8 @@ def _sinkhorn_fwd_configs(
     repeat: int | None = None,
     eps: float | None = None,
 ) -> list[dict[str, int]]:
+    if isinstance(hidden_size, tuple):
+        hidden_size, token_block_size, repeat, eps = (*hidden_size, None, None, None)[:4]
     del hidden_size, token_block_size, repeat, eps
     return [{'token_block_size': block} for block in (1, 2, 4, 8, 16)]
 
@@ -20,9 +22,13 @@ def _sinkhorn_fwd_configs(
 def _sinkhorn_bwd_configs(
     hidden_size: int,
     token_block_size: int | None = None,
-    repeat: int = 10,
+    repeat: int | None = None,
     eps: float | None = None,
 ) -> list[dict[str, int]]:
+    if isinstance(hidden_size, tuple):
+        hidden_size, token_block_size, repeat, eps = (*hidden_size, None, None, None)[:4]
+    if repeat is None:
+        repeat = 10
     del token_block_size, eps
     configs = []
     for block in (8, 16, 32, 64):
