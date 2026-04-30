@@ -566,6 +566,24 @@ def test_mhc_e2e_tilelang_native_benchmark(
     post_bias_data = _rand(hidden)
 
     def bench_fn() -> None:
+        if phase == 'fwd':
+            with torch.no_grad():
+                residual = residual_data.clone()
+                fn = fn_data.clone()
+                scale = scale_data.clone()
+                base = base_data.clone()
+                post_bias = post_bias_data.clone()
+                _run_tilelang_native_mhc_e2e(
+                    residual,
+                    fn,
+                    scale,
+                    base,
+                    post_bias,
+                    n,
+                    _EPS,
+                )
+            return
+
         with torch.enable_grad():
             residual = residual_data.clone().requires_grad_()
             fn = fn_data.clone().requires_grad_()
@@ -594,7 +612,7 @@ def test_mhc_e2e_tilelang_native_benchmark(
         time_us=time_us,
         extras={
             'equivalence': 'tilelang-native-approx-simple-pipeline',
-            'fwd_grad_mode': 'enabled',
+            'fwd_grad_mode': 'disabled' if phase == 'fwd' else 'enabled',
             'mix_dtype': 'float32',
             'sinkhorn_repeat': _SINKHORN_REPEAT,
             'sublayer': 'identity',
