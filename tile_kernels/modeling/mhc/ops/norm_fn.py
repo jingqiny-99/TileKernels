@@ -13,9 +13,6 @@ from tile_kernels.mhc.norm_fn_kernel import (
 )
 
 
-_BWD_MUL_AUTOTUNE_KEYS: set[tuple[int, int, int, str]] = set()
-
-
 class _MHCFnNormwMerge(torch.autograd.Function):
     @staticmethod
     def forward(ctx: '_MHCFnNormwMerge', fn: torch.Tensor, normw: torch.Tensor) -> torch.Tensor:
@@ -178,21 +175,7 @@ class MHCPreNormFn(torch.autograd.Function):
 
         out_mul_grad = round_to_tf32(out_mul_grad)
 
-        tune_key = (mhc_mult3, mhc_hidden_size, x.numel(), str(x.device))
-        if tune_key not in _BWD_MUL_AUTOTUNE_KEYS:
-            tune_x_grad = x_grad.clone()
-            with set_autotune_inputs(
-                out_mul_grad.view(-1, 1, mhc_mult3),
-                sqrsum_grad.view(-1, 1),
-                x.view(-1, mhc_hidden_size),
-                fn,
-                tune_x_grad.view(-1, mhc_hidden_size),
-                fn_grad,
-            ):
-                bwd_mul_kernel = _mhc_pre_norm_fn_bwd_mul(mhc_mult3, 1, mhc_hidden_size)
-            _BWD_MUL_AUTOTUNE_KEYS.add(tune_key)
-        else:
-            bwd_mul_kernel = _mhc_pre_norm_fn_bwd_mul(mhc_mult3, 1, mhc_hidden_size)
+        bwd_mul_kernel = _mhc_pre_norm_fn_bwd_mul(mhc_mult3, 1, mhc_hidden_size, token_block=128, hidden_block=128)
         bwd_mul_kernel(
             out_mul_grad.view(-1, 1, mhc_mult3),
             sqrsum_grad.view(-1, 1),

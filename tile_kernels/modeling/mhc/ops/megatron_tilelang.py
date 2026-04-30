@@ -22,9 +22,6 @@ EQUIVALENCE = {
     'proj_rms_compute_h': 'near-exact formula, TileLang TF32 projection, no split-K',
 }
 
-_PROJ_BWD_MUL_AUTOTUNE_KEYS: set[tuple[int, int, int, str]] = set()
-
-
 def tilelang_fused_sinkhorn(input_logits: torch.Tensor, num_iterations: int, eps: float = 1e-6) -> torch.Tensor:
     return sinkhorn_normalize(input_logits, repeat=num_iterations, eps=eps)
 
@@ -126,21 +123,7 @@ class TileLangFusedProjRmsComputeHBetterApprox(torch.autograd.Function):
 
         grad_x = torch.zeros_like(x)
         grad_weight = torch.empty_like(fn)
-        tune_key = (out_features, k, m, str(x.device))
-        if tune_key not in _PROJ_BWD_MUL_AUTOTUNE_KEYS:
-            tune_grad_x = grad_x.clone()
-            with set_autotune_inputs(
-                grad_proj.view(m, 1, out_features),
-                sqrsum_grad.view(m, 1),
-                x,
-                fn,
-                tune_grad_x,
-                grad_weight,
-            ):
-                bwd_mul_kernel = _mhc_pre_norm_fn_bwd_mul(out_features, 1, k)
-            _PROJ_BWD_MUL_AUTOTUNE_KEYS.add(tune_key)
-        else:
-            bwd_mul_kernel = _mhc_pre_norm_fn_bwd_mul(out_features, 1, k)
+        bwd_mul_kernel = _mhc_pre_norm_fn_bwd_mul(out_features, 1, k, token_block=128, hidden_block=128)
         bwd_mul_kernel(
             grad_proj.view(m, 1, out_features),
             sqrsum_grad.view(m, 1),

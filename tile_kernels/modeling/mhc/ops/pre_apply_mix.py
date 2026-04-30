@@ -4,9 +4,6 @@ from tilelang.autotuner import set_autotune_inputs
 from tile_kernels.mhc.pre_apply_mix_kernel import _mhc_pre_apply_mix_bwd, _mhc_pre_apply_mix_fwd
 
 
-_BWD_AUTOTUNE_KEYS: set[tuple[int, int, int, str]] = set()
-
-
 class MHCPreApplyMix(torch.autograd.Function):
     @staticmethod
     def forward(
@@ -31,16 +28,9 @@ class MHCPreApplyMix(torch.autograd.Function):
         x, mix = ctx.saved_tensors
         h = x.shape[-1]
         mhc = mix.shape[-2]
-        tune_key = (mhc, h, o_grad.numel(), str(o_grad.device))
         if hasattr(x.untyped_storage(), 'grad_from_mhc_post'):
             x_grad = x.untyped_storage().grad_from_mhc_post
-            if tune_key not in _BWD_AUTOTUNE_KEYS:
-                tune_x_grad = x_grad.clone()
-                with set_autotune_inputs(o_grad.view(-1, h), x.view(-1, mhc, h), mix.view(-1, mhc), tune_x_grad.view(-1, mhc, h)):
-                    bwd_kernel = _mhc_pre_apply_mix_bwd(mhc, h)
-                _BWD_AUTOTUNE_KEYS.add(tune_key)
-            else:
-                bwd_kernel = _mhc_pre_apply_mix_bwd(mhc, h)
+            bwd_kernel = _mhc_pre_apply_mix_bwd(mhc, h, n_thr=128, h_blk=1024, num_stages=2)
             mix_grad = bwd_kernel(
                 o_grad.view(-1, h),
                 x.view(-1, mhc, h),
@@ -50,13 +40,7 @@ class MHCPreApplyMix(torch.autograd.Function):
             x_grad = None
         else:
             x_grad = torch.zeros_like(x)
-            if tune_key not in _BWD_AUTOTUNE_KEYS:
-                tune_x_grad = x_grad.clone()
-                with set_autotune_inputs(o_grad.view(-1, h), x.view(-1, mhc, h), mix.view(-1, mhc), tune_x_grad.view(-1, mhc, h)):
-                    bwd_kernel = _mhc_pre_apply_mix_bwd(mhc, h)
-                _BWD_AUTOTUNE_KEYS.add(tune_key)
-            else:
-                bwd_kernel = _mhc_pre_apply_mix_bwd(mhc, h)
+            bwd_kernel = _mhc_pre_apply_mix_bwd(mhc, h, n_thr=128, h_blk=1024, num_stages=2)
             mix_grad = bwd_kernel(
                 o_grad.view(-1, h),
                 x.view(-1, mhc, h),
