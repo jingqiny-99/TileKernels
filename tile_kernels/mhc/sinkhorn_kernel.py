@@ -9,9 +9,9 @@ _PASS_CONFIGS = {
 
 def _sinkhorn_fwd_configs(
     hidden_size: int,
-    token_block_size: int,
-    repeat: int,
-    eps: float,
+    token_block_size: int | None = None,
+    repeat: int | None = None,
+    eps: float | None = None,
 ) -> list[dict[str, int]]:
     del hidden_size, token_block_size, repeat, eps
     return [{'token_block_size': block} for block in (1, 2, 4, 8, 16)]
@@ -19,9 +19,9 @@ def _sinkhorn_fwd_configs(
 
 def _sinkhorn_bwd_configs(
     hidden_size: int,
-    token_block_size: int,
-    repeat: int,
-    eps: float,
+    token_block_size: int | None = None,
+    repeat: int = 10,
+    eps: float | None = None,
 ) -> list[dict[str, int]]:
     del token_block_size, eps
     configs = []

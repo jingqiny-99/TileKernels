@@ -10,8 +10,8 @@ _PASS_CONFIGS = {
 def _pre_split_configs(
     mhc_mult: int,
     mhc_post_mult_value: float,
-    mhc_pre_eps: float,
-    token_block_size: int,
+    mhc_pre_eps: float | None = None,
+    token_block_size: int | None = None,
     dtype: T.dtype = T.float32,
 ) -> list[dict[str, int]]:
     del mhc_mult, mhc_post_mult_value, mhc_pre_eps, token_block_size, dtype
@@ -21,7 +21,7 @@ def _pre_split_configs(
 def _pre_split_bwd_configs(
     mhc_mult: int,
     mhc_post_mult_value: float,
-    token_block_size: int,
+    token_block_size: int | None = None,
     num_sms: int = 148,
     dtype: T.dtype = T.float32,
 ) -> list[dict[str, int]]:

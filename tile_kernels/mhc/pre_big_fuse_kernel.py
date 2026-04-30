@@ -25,11 +25,11 @@ def _dedupe_configs(configs: list[dict[str, int]]) -> list[dict[str, int]]:
 
 def _pre_big_fuse_configs(
     hidden_size: int,
-    rms_eps: float,
-    mhc_pre_eps: float,
-    mhc_sinkhorn_eps: float,
-    mhc_post_mult_value: float,
-    sinkhorn_repeat: int,
+    rms_eps: float | None = None,
+    mhc_pre_eps: float | None = None,
+    mhc_sinkhorn_eps: float | None = None,
+    mhc_post_mult_value: float | None = None,
+    sinkhorn_repeat: int | None = None,
     n_splits: int = 16,
     mhc_mult: int = 4,
     threads: int = 96,

@@ -26,16 +26,22 @@ def _dedupe_configs(configs: list[dict[str, int]]) -> list[dict[str, int]]:
 
 def _post_fwd_configs(
     mhc: int,
-    hidden: int,
+    hidden: int | None = None,
     n_thr: int = 128,
     h_blk: int = 1024,
     num_stages: int = 2,
 ) -> list[dict[str, int]]:
     del mhc, n_thr, h_blk, num_stages
-    h_blks = sorted({math.gcd(hidden, candidate) for candidate in (256, 512, 1024)})
+    candidates = (256, 512, 1024)
+    if isinstance(hidden, int):
+        h_blks = sorted({math.gcd(hidden, candidate) for candidate in candidates})
+    else:
+        h_blks = list(candidates)
     configs = []
     for block in h_blks:
-        if block <= 0 or hidden % block != 0:
+        if block <= 0:
+            continue
+        if isinstance(hidden, int) and hidden % block != 0:
             continue
         for threads in (96, 128, 256):
             for stages in (2, 3):
@@ -45,16 +51,22 @@ def _post_fwd_configs(
 
 def _post_bwd_configs(
     mhc: int,
-    hidden: int,
+    hidden: int | None = None,
     n_thr: int = 128,
     h_blk: int = 256,
     num_stages: int = 3,
 ) -> list[dict[str, int]]:
     del mhc, n_thr, h_blk, num_stages
-    h_blks = sorted({math.gcd(hidden, candidate) for candidate in (128, 256, 512)})
+    candidates = (128, 256, 512)
+    if isinstance(hidden, int):
+        h_blks = sorted({math.gcd(hidden, candidate) for candidate in candidates})
+    else:
+        h_blks = list(candidates)
     configs = []
     for block in h_blks:
-        if block <= 0 or hidden % block != 0:
+        if block <= 0:
+            continue
+        if isinstance(hidden, int) and hidden % block != 0:
             continue
         for threads in (96, 128, 256):
             for stages in (2, 3):
