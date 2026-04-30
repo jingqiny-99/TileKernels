@@ -282,7 +282,10 @@ def mhc_post_bwd(
         post_layer_mix.view(n, mhc),
         x.view(n, h),
     ):
-        bwd_kernel = _mhc_post_bwd(mhc, h)
+        # TileLang autotuner benchmarks candidate kernels in worker threads, but
+        # its timeout path uses signal.signal(), which only works in Python's
+        # main thread. Use a known-compilable direct config for the E2E bwd path.
+        bwd_kernel = _mhc_post_bwd(mhc, h, n_thr=128, h_blk=256, num_stages=3)
     (
         d_comb_res_mix,
         d_residual,
