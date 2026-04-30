@@ -24,17 +24,21 @@ def _dedupe_configs(configs: list[dict[str, int]]) -> list[dict[str, int]]:
 def _pre_norm_fwd_mul_configs(
     mhc_mult3: int,
     n_rms_group: int,
-    rms_group_size: int,
+    rms_group_size: int | None = None,
     token_block: int = 32,
     hidden_block: int = 256,
     num_stages: int = 2,
 ) -> list[dict[str, int]]:
     del mhc_mult3, n_rms_group, token_block, hidden_block, num_stages
     configs = []
-    hidden_blocks = sorted({math.gcd(rms_group_size, candidate) for candidate in (128, 256, 512)})
+    candidates = (128, 256, 512)
+    if isinstance(rms_group_size, int):
+        hidden_blocks = sorted({math.gcd(rms_group_size, candidate) for candidate in candidates})
+    else:
+        hidden_blocks = list(candidates)
     for tb in (16, 32, 64):
         for hb in hidden_blocks:
-            if rms_group_size % hb != 0:
+            if isinstance(rms_group_size, int) and rms_group_size % hb != 0:
                 continue
             if hb < 4 or hb % 4 != 0:
                 continue
@@ -48,17 +52,21 @@ def _pre_norm_fwd_mul_configs(
 def _pre_norm_bwd_mul_configs(
     mhc_mult3: int,
     n_rms_group: int,
-    rms_group_size: int,
+    rms_group_size: int | None = None,
     token_block: int = 128,
     hidden_block: int = 128,
     num_stages: int = 1,
 ) -> list[dict[str, int]]:
     del mhc_mult3, n_rms_group, token_block, hidden_block, num_stages
     configs = []
-    hidden_blocks = sorted({math.gcd(rms_group_size, candidate) for candidate in (64, 128, 256)})
+    candidates = (64, 128, 256)
+    if isinstance(rms_group_size, int):
+        hidden_blocks = sorted({math.gcd(rms_group_size, candidate) for candidate in candidates})
+    else:
+        hidden_blocks = list(candidates)
     for tb in (64, 128):
         for hb in hidden_blocks:
-            if rms_group_size % hb != 0:
+            if isinstance(rms_group_size, int) and rms_group_size % hb != 0:
                 continue
             if hb <= 0:
                 continue

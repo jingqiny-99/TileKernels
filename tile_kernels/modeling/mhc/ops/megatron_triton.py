@@ -664,7 +664,7 @@ def _triton_matmul_norm_split_k_kernel(
     acc = tl.zeros((BLOCK_M, N_PAD), dtype=tl.float32)
     sum_sq = tl.zeros((BLOCK_M,), dtype=tl.float32)
 
-    for block_offset in tl.static_range(0, blocks_per_split):
+    for block_offset in tl.range(0, blocks_per_split):
         k_block = first_block + block_offset
         k_start = k_block * BLOCK_K
         in_split = k_block < last_block
@@ -799,7 +799,7 @@ def _triton_grad_x_weight_kernel(
     acc_db = tl.zeros((BLOCK_K, N_PAD), dtype=tl.float32)
     NUM_M_TILES = tl.cdiv(M, BLOCK_M)
 
-    for m_tile in range(NUM_M_TILES):
+    for m_tile in tl.range(0, NUM_M_TILES):
         offs_m = m_tile * BLOCK_M + tl.arange(0, BLOCK_M)
         mask_m = offs_m < M
         mask_mk = mask_m[:, None] & mask_k[None, :]
