@@ -29,6 +29,8 @@ def _pre_norm_fwd_mul_configs(
     hidden_block: int = 256,
     num_stages: int = 2,
 ) -> list[dict[str, int]]:
+    if isinstance(mhc_mult3, tuple):
+        mhc_mult3, n_rms_group, rms_group_size = (*mhc_mult3, None, None)[:3]
     del mhc_mult3, n_rms_group, token_block, hidden_block, num_stages
     configs = []
     candidates = (128, 256, 512)
@@ -57,6 +59,8 @@ def _pre_norm_bwd_mul_configs(
     hidden_block: int = 128,
     num_stages: int = 1,
 ) -> list[dict[str, int]]:
+    if isinstance(mhc_mult3, tuple):
+        mhc_mult3, n_rms_group, rms_group_size = (*mhc_mult3, None, None)[:3]
     del mhc_mult3, n_rms_group, token_block, hidden_block, num_stages
     configs = []
     candidates = (64, 128, 256)

@@ -29,6 +29,8 @@ def _pre_apply_configs(
     h_blk: int = 1024,
     num_stages: int = 2,
 ) -> list[dict[str, int]]:
+    if isinstance(mhc_mult, tuple):
+        mhc_mult, hidden = (*mhc_mult, None)[:2]
     del mhc_mult, n_thr, h_blk, num_stages
     candidates = (256, 512, 1024)
     if isinstance(hidden, int):

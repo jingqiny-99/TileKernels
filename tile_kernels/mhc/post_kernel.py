@@ -31,6 +31,8 @@ def _post_fwd_configs(
     h_blk: int = 1024,
     num_stages: int = 2,
 ) -> list[dict[str, int]]:
+    if isinstance(mhc, tuple):
+        mhc, hidden = (*mhc, None)[:2]
     del mhc, n_thr, h_blk, num_stages
     candidates = (256, 512, 1024)
     if isinstance(hidden, int):
@@ -56,6 +58,8 @@ def _post_bwd_configs(
     h_blk: int = 256,
     num_stages: int = 3,
 ) -> list[dict[str, int]]:
+    if isinstance(mhc, tuple):
+        mhc, hidden = (*mhc, None)[:2]
     del mhc, n_thr, h_blk, num_stages
     candidates = (128, 256, 512)
     if isinstance(hidden, int):

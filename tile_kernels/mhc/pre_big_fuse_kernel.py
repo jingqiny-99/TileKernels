@@ -36,6 +36,8 @@ def _pre_big_fuse_configs(
     hidden_block: int = 512,
     num_stages: int = 2,
 ) -> list[dict[str, int]]:
+    if isinstance(hidden_size, tuple):
+        hidden_size = hidden_size[0]
     del rms_eps, mhc_pre_eps, mhc_sinkhorn_eps, mhc_post_mult_value, sinkhorn_repeat, n_splits, mhc_mult, threads, hidden_block, num_stages
     h_blks = sorted({math.gcd(hidden_size, candidate) for candidate in (256, 512, 1024)})
     configs = []
