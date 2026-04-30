@@ -656,8 +656,8 @@ def _triton_matmul_norm_split_k_kernel(
     offs_n = tl.arange(0, N_PAD)
     mask_n = offs_n < N
 
-    num_k_blocks = tl.cdiv(K, BLOCK_K)
-    blocks_per_split = tl.cdiv(num_k_blocks, SPLIT_K)
+    num_k_blocks = (K + BLOCK_K - 1) // BLOCK_K
+    blocks_per_split = (num_k_blocks + SPLIT_K - 1) // SPLIT_K
     first_block = pid_k * blocks_per_split
     last_block = tl.minimum(first_block + blocks_per_split, num_k_blocks)
 

@@ -1,4 +1,5 @@
 import torch
+from tilelang.autotuner import set_autotune_inputs
 
 from tile_kernels.mhc.sinkhorn_kernel import _mhc_sinkhorn_bwd, _mhc_sinkhorn_fwd
 
@@ -13,10 +14,11 @@ class _SinkhornNormalize(torch.autograd.Function):
     ) -> torch.Tensor:
         hidden_size = x.shape[1]
         output = torch.empty_like(x)
-        fwd_kernel = _mhc_sinkhorn_fwd(hidden_size, 1, repeat, eps)
-        bwd_kernel = _mhc_sinkhorn_bwd(hidden_size, 32, repeat, eps)
+        with set_autotune_inputs(x, output):
+            fwd_kernel = _mhc_sinkhorn_fwd(hidden_size, 1, repeat, eps)
         ctx.save_for_backward(x)
-        ctx.bwd_kernel = bwd_kernel
+        ctx.repeat = repeat
+        ctx.eps = eps
         fwd_kernel(x, output)
         return output
 
@@ -24,7 +26,10 @@ class _SinkhornNormalize(torch.autograd.Function):
     def backward(ctx: '_SinkhornNormalize', grad_output: torch.Tensor) -> tuple[torch.Tensor, None, None]:
         x = ctx.saved_tensors[0]
         grad_input = torch.empty_like(x)
-        ctx.bwd_kernel(grad_output, x, grad_input)
+        hidden_size = x.shape[1]
+        with set_autotune_inputs(grad_output, x, grad_input):
+            bwd_kernel = _mhc_sinkhorn_bwd(hidden_size, 32, ctx.repeat, ctx.eps)
+        bwd_kernel(grad_output, x, grad_input)
         return grad_input, None, None
 
 

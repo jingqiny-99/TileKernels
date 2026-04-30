@@ -1,4 +1,5 @@
 import torch
+from tilelang.autotuner import set_autotune_inputs
 
 from tile_kernels.config import get_num_sms
 from tile_kernels.mhc.pre_split_mixes_kernel import _mhc_pre_split_mixes_bwd, _mhc_pre_split_mixes_fwd
@@ -30,24 +31,20 @@ class MHCPreSplitMixes(torch.autograd.Function):
         post_layer_mix = input_mixes.new_empty(num_tokens, mhc_mult)
         comb_res_mix = input_mixes.new_empty(num_tokens, mhc_mult2)
 
-        ctx.fwd_kernel = _mhc_pre_split_mixes_fwd(
-            mhc_mult,
-            mhc_post_mult_value,
-            mhc_pre_eps,
-            token_block_size=32,
-        )
-        ctx.bwd_kernel = _mhc_pre_split_mixes_bwd(
-            mhc_mult,
-            mhc_post_mult_value,
-            token_block_size=32,
-            num_sms=get_num_sms(),
-        )
         ctx.num_sms = get_num_sms()
+        with set_autotune_inputs(input_mixes, mhc_scale, mhc_base, pre_layer_mix, post_layer_mix, comb_res_mix):
+            fwd_kernel = _mhc_pre_split_mixes_fwd(
+                mhc_mult,
+                mhc_post_mult_value,
+                mhc_pre_eps,
+                token_block_size=32,
+            )
 
-        ctx.fwd_kernel(input_mixes, mhc_scale, mhc_base, pre_layer_mix, post_layer_mix, comb_res_mix)
+        fwd_kernel(input_mixes, mhc_scale, mhc_base, pre_layer_mix, post_layer_mix, comb_res_mix)
 
         ctx.save_for_backward(input_mixes, pre_layer_mix, post_layer_mix, mhc_scale, mhc_base)
         ctx.mhc_mult = mhc_mult
+        ctx.mhc_post_mult_value = mhc_post_mult_value
 
         pre_layer_mix = pre_layer_mix.view(*ctx.tokens_shape, mhc_mult, 1)
         post_layer_mix = post_layer_mix.view(*ctx.tokens_shape, mhc_mult, 1)
@@ -81,7 +78,25 @@ class MHCPreSplitMixes(torch.autograd.Function):
 
         num_tokens = input_mixes.shape[0]
         mhc_mult = ctx.mhc_mult
-        ctx.bwd_kernel(
+        with set_autotune_inputs(
+            pre_layer_mix_grad.view(num_tokens, mhc_mult),
+            post_layer_mix_grad.view(num_tokens, mhc_mult),
+            comb_res_mix_grad.view(num_tokens, mhc_mult * mhc_mult),
+            input_mixes,
+            post_layer_mix,
+            mhc_scale,
+            mhc_base,
+            input_mixes_grad,
+            mhc_scale_grad_partial,
+            mhc_base_grad_partial,
+        ):
+            bwd_kernel = _mhc_pre_split_mixes_bwd(
+                mhc_mult,
+                mhc_post_mult_value=ctx.mhc_post_mult_value,
+                token_block_size=32,
+                num_sms=ctx.num_sms,
+            )
+        bwd_kernel(
             # Gradient of output
             pre_layer_mix_grad.view(num_tokens, mhc_mult),
             post_layer_mix_grad.view(num_tokens, mhc_mult),

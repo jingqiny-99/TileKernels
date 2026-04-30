@@ -1,3 +1,5 @@
+import math
+
 import tilelang
 import torch
 from tilelang import language as T
@@ -6,6 +8,64 @@ from tilelang import language as T
 _PASS_CONFIGS = {
     tilelang.PassConfigKey.TL_DISABLE_WGMMA: True,
 }
+
+
+def _dedupe_configs(configs: list[dict[str, int]]) -> list[dict[str, int]]:
+    seen = set()
+    out = []
+    for cfg in configs:
+        key = tuple(sorted(cfg.items()))
+        if key not in seen:
+            seen.add(key)
+            out.append(cfg)
+    return out
+
+
+def _pre_norm_fwd_mul_configs(
+    mhc_mult3: int,
+    n_rms_group: int,
+    rms_group_size: int,
+    token_block: int = 32,
+    hidden_block: int = 256,
+    num_stages: int = 2,
+) -> list[dict[str, int]]:
+    del mhc_mult3, n_rms_group, token_block, hidden_block, num_stages
+    configs = []
+    hidden_blocks = sorted({math.gcd(rms_group_size, candidate) for candidate in (128, 256, 512)})
+    for tb in (16, 32, 64):
+        for hb in hidden_blocks:
+            if rms_group_size % hb != 0:
+                continue
+            if hb < 4 or hb % 4 != 0:
+                continue
+            shared_bytes = tb * hb * 2 + 32 * hb * 4
+            if shared_bytes <= 96 * 1024:
+                for stages in (2, 3):
+                    configs.append({'token_block': tb, 'hidden_block': hb, 'num_stages': stages})
+    return _dedupe_configs(configs)
+
+
+def _pre_norm_bwd_mul_configs(
+    mhc_mult3: int,
+    n_rms_group: int,
+    rms_group_size: int,
+    token_block: int = 128,
+    hidden_block: int = 128,
+    num_stages: int = 1,
+) -> list[dict[str, int]]:
+    del mhc_mult3, n_rms_group, token_block, hidden_block, num_stages
+    configs = []
+    hidden_blocks = sorted({math.gcd(rms_group_size, candidate) for candidate in (64, 128, 256)})
+    for tb in (64, 128):
+        for hb in hidden_blocks:
+            if rms_group_size % hb != 0:
+                continue
+            if hb <= 0:
+                continue
+            shared_bytes = tb * hb * 4 + tb * 32 * 4 + 32 * hb * 4
+            if shared_bytes <= 128 * 1024:
+                configs.append({'token_block': tb, 'hidden_block': hb})
+    return _dedupe_configs(configs)
 
 
 @tilelang.jit
@@ -61,6 +121,7 @@ def _mhc_fn_normw_merge_bwd(m: int, n: int, dtype: T.dtype = T.float32) -> tilel
     return _mhc_fn_normw_merge_bwd_
 
 
+@tilelang.autotune(configs=_pre_norm_fwd_mul_configs, warmup=10, rep=20, timeout=60)
 @tilelang.jit(pass_configs=_PASS_CONFIGS)
 def _mhc_pre_norm_fn_fwd_mul(
     mhc_mult3: int,
@@ -68,6 +129,7 @@ def _mhc_pre_norm_fn_fwd_mul(
     rms_group_size: int,
     token_block: int = 32,
     hidden_block: int = 256,
+    num_stages: int = 2,
 ) -> tilelang.JITKernel:
     assert mhc_mult3 <= 32
     num_tokens = T.dynamic('num_tokens')
@@ -86,7 +148,7 @@ def _mhc_pre_norm_fn_fwd_mul(
             sqrsum_part = T.alloc_fragment((token_block, 4), T.float32)
             T.clear(out_frag)
             T.clear(sqrsum_part)
-            for pz in T.Pipelined(rms_group_size // hidden_block, num_stages=2):
+            for pz in T.Pipelined(rms_group_size // hidden_block, num_stages=num_stages):
                 x_smem_16 = T.alloc_shared((token_block, hidden_block), T.bfloat16)
                 fn_smem = T.alloc_shared((32, hidden_block), T.float32)
 
@@ -117,7 +179,7 @@ def _mhc_pre_norm_fn_fwd_mul(
             for i in T.Parallel(token_block):
                 sqrsum[pid_x * token_block + i, pid_y] = sqrsum_l[i]
             for i, j in T.Parallel(token_block, 32):
-                if j < 24:
+                if j < mhc_mult3:
                     out[pid_x * token_block + i, pid_y, j] = out_frag[i, j]
 
     return _mhc_pre_norm_fn_fwd_mul_kernel
@@ -205,6 +267,7 @@ def _mhc_pre_norm_fn_bwd_norm(
     return _mhc_pre_norm_fn_bwd_norm_kernel
 
 
+@tilelang.autotune(configs=_pre_norm_bwd_mul_configs, warmup=10, rep=20, timeout=60)
 @tilelang.jit(pass_configs=_PASS_CONFIGS)
 def _mhc_pre_norm_fn_bwd_mul(
     mhc_mult3: int,

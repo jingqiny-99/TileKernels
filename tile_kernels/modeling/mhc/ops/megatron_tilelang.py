@@ -6,6 +6,7 @@ pipeline benchmark can report it without implying strict numerical equivalence.
 """
 
 import torch
+from tilelang.autotuner import set_autotune_inputs
 
 from tile_kernels.mhc.norm_fn_kernel import _mhc_pre_norm_fn_bwd_mul, _mhc_pre_norm_fn_fwd_mul, round_to_tf32
 
@@ -20,6 +21,8 @@ EQUIVALENCE = {
     'h_post_bda': 'exact when bias is folded into x and h_res is transposed for mhc_post',
     'proj_rms_compute_h': 'near-exact formula, TileLang TF32 projection, no split-K',
 }
+
+_PROJ_BWD_MUL_AUTOTUNE_KEYS: set[tuple[int, int, int, str]] = set()
 
 
 def tilelang_fused_sinkhorn(input_logits: torch.Tensor, num_iterations: int, eps: float = 1e-6) -> torch.Tensor:
@@ -74,7 +77,9 @@ class TileLangFusedProjRmsComputeHBetterApprox(torch.autograd.Function):
 
         proj_buf = torch.empty(m, 1, out_features, dtype=torch.float32, device=x.device)
         sqrsum_buf = torch.empty(m, 1, dtype=torch.float32, device=x.device)
-        _mhc_pre_norm_fn_fwd_mul(out_features, 1, k)(
+        with set_autotune_inputs(x_c, fn, proj_buf, sqrsum_buf):
+            fwd_mul_kernel = _mhc_pre_norm_fn_fwd_mul(out_features, 1, k)
+        fwd_mul_kernel(
             x_c,
             fn,
             proj_buf,
@@ -121,7 +126,22 @@ class TileLangFusedProjRmsComputeHBetterApprox(torch.autograd.Function):
 
         grad_x = torch.zeros_like(x)
         grad_weight = torch.empty_like(fn)
-        _mhc_pre_norm_fn_bwd_mul(out_features, 1, k)(
+        tune_key = (out_features, k, m, str(x.device))
+        if tune_key not in _PROJ_BWD_MUL_AUTOTUNE_KEYS:
+            tune_grad_x = grad_x.clone()
+            with set_autotune_inputs(
+                grad_proj.view(m, 1, out_features),
+                sqrsum_grad.view(m, 1),
+                x,
+                fn,
+                tune_grad_x,
+                grad_weight,
+            ):
+                bwd_mul_kernel = _mhc_pre_norm_fn_bwd_mul(out_features, 1, k)
+            _PROJ_BWD_MUL_AUTOTUNE_KEYS.add(tune_key)
+        else:
+            bwd_mul_kernel = _mhc_pre_norm_fn_bwd_mul(out_features, 1, k)
+        bwd_mul_kernel(
             grad_proj.view(m, 1, out_features),
             sqrsum_grad.view(m, 1),
             x,

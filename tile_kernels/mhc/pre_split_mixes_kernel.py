@@ -7,6 +7,29 @@ _PASS_CONFIGS = {
 }
 
 
+def _pre_split_configs(
+    mhc_mult: int,
+    mhc_post_mult_value: float,
+    mhc_pre_eps: float,
+    token_block_size: int,
+    dtype: T.dtype = T.float32,
+) -> list[dict[str, int]]:
+    del mhc_mult, mhc_post_mult_value, mhc_pre_eps, token_block_size, dtype
+    return [{'token_block_size': block} for block in (16, 32, 64, 128)]
+
+
+def _pre_split_bwd_configs(
+    mhc_mult: int,
+    mhc_post_mult_value: float,
+    token_block_size: int,
+    num_sms: int = 148,
+    dtype: T.dtype = T.float32,
+) -> list[dict[str, int]]:
+    del mhc_mult, mhc_post_mult_value, token_block_size, num_sms, dtype
+    return [{'token_block_size': block} for block in (16, 32, 64, 128)]
+
+
+@tilelang.autotune(configs=_pre_split_configs, warmup=10, rep=20, timeout=60)
 @tilelang.jit(pass_configs=_PASS_CONFIGS)
 def _mhc_pre_split_mixes_fwd(
     mhc_mult: int,
@@ -67,6 +90,7 @@ def _mhc_pre_split_mixes_fwd(
     return mhc_pre_split_mixes_fwd_kernel
 
 
+@tilelang.autotune(configs=_pre_split_bwd_configs, warmup=10, rep=20, timeout=60)
 @tilelang.jit(pass_configs=_PASS_CONFIGS)
 def _mhc_pre_split_mixes_bwd(
     mhc_mult: int,

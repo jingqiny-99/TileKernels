@@ -7,6 +7,33 @@ _PASS_CONFIGS = {
 }
 
 
+def _sinkhorn_fwd_configs(
+    hidden_size: int,
+    token_block_size: int,
+    repeat: int,
+    eps: float,
+) -> list[dict[str, int]]:
+    del hidden_size, token_block_size, repeat, eps
+    return [{'token_block_size': block} for block in (1, 2, 4, 8, 16)]
+
+
+def _sinkhorn_bwd_configs(
+    hidden_size: int,
+    token_block_size: int,
+    repeat: int,
+    eps: float,
+) -> list[dict[str, int]]:
+    del token_block_size, eps
+    configs = []
+    for block in (8, 16, 32, 64):
+        scratch_bytes = repeat * 2 * block * hidden_size * hidden_size * 4
+        scratch_bytes += repeat * 2 * block * hidden_size * 4
+        if scratch_bytes <= 96 * 1024:
+            configs.append({'token_block_size': block})
+    return configs
+
+
+@tilelang.autotune(configs=_sinkhorn_fwd_configs, warmup=10, rep=20, timeout=60)
 @tilelang.jit(pass_configs=_PASS_CONFIGS)
 def _mhc_sinkhorn_fwd(
     hidden_size: int,
@@ -58,6 +85,7 @@ def _mhc_sinkhorn_fwd(
     return mhc_sinkhorn_kernel
 
 
+@tilelang.autotune(configs=_sinkhorn_bwd_configs, warmup=10, rep=20, timeout=60)
 @tilelang.jit(pass_configs=_PASS_CONFIGS)
 def _mhc_sinkhorn_bwd(
     hidden_size: int,

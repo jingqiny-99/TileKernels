@@ -3,16 +3,76 @@ import math
 import tilelang
 import torch
 from tilelang import language as T
+from tilelang.autotuner import set_autotune_inputs
 
 
+_PASS_CONFIGS = {
+    tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
+    tilelang.PassConfigKey.TL_DISABLE_VECTORIZE_256: True,
+}
+
+
+def _dedupe_configs(configs: list[dict[str, int]]) -> list[dict[str, int]]:
+    seen = set()
+    out = []
+    for cfg in configs:
+        key = tuple(sorted(cfg.items()))
+        if key not in seen:
+            seen.add(key)
+            out.append(cfg)
+    return out
+
+
+def _post_fwd_configs(
+    mhc: int,
+    hidden: int,
+    n_thr: int = 128,
+    h_blk: int = 1024,
+    num_stages: int = 2,
+) -> list[dict[str, int]]:
+    del mhc, n_thr, h_blk, num_stages
+    h_blks = sorted({math.gcd(hidden, candidate) for candidate in (256, 512, 1024)})
+    configs = []
+    for block in h_blks:
+        if block <= 0 or hidden % block != 0:
+            continue
+        for threads in (96, 128, 256):
+            for stages in (2, 3):
+                configs.append({'n_thr': threads, 'h_blk': block, 'num_stages': stages})
+    return _dedupe_configs(configs)
+
+
+def _post_bwd_configs(
+    mhc: int,
+    hidden: int,
+    n_thr: int = 128,
+    h_blk: int = 256,
+    num_stages: int = 3,
+) -> list[dict[str, int]]:
+    del mhc, n_thr, h_blk, num_stages
+    h_blks = sorted({math.gcd(hidden, candidate) for candidate in (128, 256, 512)})
+    configs = []
+    for block in h_blks:
+        if block <= 0 or hidden % block != 0:
+            continue
+        for threads in (96, 128, 256):
+            for stages in (2, 3):
+                configs.append({'n_thr': threads, 'h_blk': block, 'num_stages': stages})
+    return _dedupe_configs(configs)
+
+
+@tilelang.autotune(configs=_post_fwd_configs, warmup=10, rep=20, timeout=60)
 @tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
-        tilelang.PassConfigKey.TL_DISABLE_VECTORIZE_256: True,
-    },
+    pass_configs=_PASS_CONFIGS,
 )
-def _mhc_post_fwd(mhc: int, hidden: int, n_thr: int = 128, h_blk: int = 1024) -> tilelang.JITKernel:
+def _mhc_post_fwd(
+    mhc: int,
+    hidden: int,
+    n_thr: int = 128,
+    h_blk: int = 1024,
+    num_stages: int = 2,
+) -> tilelang.JITKernel:
     n = T.dynamic('num_tokens')
     h = hidden
 
@@ -41,7 +101,7 @@ def _mhc_post_fwd(mhc: int, hidden: int, n_thr: int = 128, h_blk: int = 1024) ->
             T.copy(c[pid_n, 0], c_local)
             T.pdl_sync()
 
-            for i0_h in T.Pipelined(T.ceildiv(h, h_blk), num_stages=2):
+            for i0_h in T.Pipelined(T.ceildiv(h, h_blk), num_stages=num_stages):
                 T.copy(b[pid_n, 0, i0_h * h_blk], b_shared, disable_tma=True)
                 T.copy(d[pid_n, i0_h * h_blk], d_shared, disable_tma=True)
 
@@ -58,15 +118,18 @@ def _mhc_post_fwd(mhc: int, hidden: int, n_thr: int = 128, h_blk: int = 1024) ->
     return _mhc_post_fwd_kernel
 
 
+@tilelang.autotune(configs=_post_bwd_configs, warmup=10, rep=20, timeout=60)
 @tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
-        tilelang.PassConfigKey.TL_DISABLE_VECTORIZE_256: True,
-    },
+    pass_configs=_PASS_CONFIGS,
     out_idx=[5, 6, 7, 8],
 )
-def _mhc_post_bwd(mhc: int, hidden: int, n_thr: int = 128, h_blk: int = 256) -> tilelang.JITKernel:
+def _mhc_post_bwd(
+    mhc: int,
+    hidden: int,
+    n_thr: int = 128,
+    h_blk: int = 256,
+    num_stages: int = 3,
+) -> tilelang.JITKernel:
     assert mhc == 4
     n = T.dynamic('num_tokens')
     h = hidden
@@ -108,7 +171,7 @@ def _mhc_post_bwd(mhc: int, hidden: int, n_thr: int = 128, h_blk: int = 256) -> 
             T.clear(da_reducer)
             T.clear(dc_reducer)
 
-            for i0_h in T.Pipelined(T.ceildiv(h, h_blk), num_stages=3):
+            for i0_h in T.Pipelined(T.ceildiv(h, h_blk), num_stages=num_stages):
                 T.copy(dx[pid_n, 0, i0_h * h_blk], dx_shared, disable_tma=True)
                 T.copy(b[pid_n, 0, i0_h * h_blk], b_shared, disable_tma=True)
                 T.copy(d[pid_n, i0_h * h_blk], d_shared, disable_tma=True)
@@ -170,7 +233,14 @@ def mhc_post_fwd(
 
     if out is None:
         out = torch.empty_like(residual)
-    kernel = _mhc_post_fwd(mhc, hidden)
+    with set_autotune_inputs(
+        comb_res_mix.flatten(0, 1),
+        residual.flatten(0, 1),
+        post_layer_mix.flatten(0, 1).squeeze(-1),
+        x.flatten(0, 1),
+        out.flatten(0, 1),
+    ):
+        kernel = _mhc_post_fwd(mhc, hidden)
     kernel(
         comb_res_mix.flatten(0, 1),
         residual.flatten(0, 1),
@@ -193,7 +263,14 @@ def mhc_post_bwd(
     mhc = d_o.shape[2]
     h = d_o.shape[3]
 
-    bwd_kernel = _mhc_post_bwd(mhc, h)
+    with set_autotune_inputs(
+        d_o.contiguous().view(n, mhc, h),
+        comb_res_mix.view(n, mhc, mhc),
+        residual.view(n, mhc, h),
+        post_layer_mix.view(n, mhc),
+        x.view(n, h),
+    ):
+        bwd_kernel = _mhc_post_bwd(mhc, h)
     (
         d_comb_res_mix,
         d_residual,

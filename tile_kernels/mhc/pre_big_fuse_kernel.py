@@ -5,12 +5,52 @@ import torch
 from tilelang import language as T
 
 
+_PASS_CONFIGS = {
+    tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
+    tilelang.PassConfigKey.TL_DISABLE_VECTORIZE_256: True,
+}
+
+
+def _dedupe_configs(configs: list[dict[str, int]]) -> list[dict[str, int]]:
+    seen = set()
+    out = []
+    for cfg in configs:
+        key = tuple(sorted(cfg.items()))
+        if key not in seen:
+            seen.add(key)
+            out.append(cfg)
+    return out
+
+
+def _pre_big_fuse_configs(
+    hidden_size: int,
+    rms_eps: float,
+    mhc_pre_eps: float,
+    mhc_sinkhorn_eps: float,
+    mhc_post_mult_value: float,
+    sinkhorn_repeat: int,
+    n_splits: int = 16,
+    mhc_mult: int = 4,
+    threads: int = 96,
+    hidden_block: int = 512,
+    num_stages: int = 2,
+) -> list[dict[str, int]]:
+    del rms_eps, mhc_pre_eps, mhc_sinkhorn_eps, mhc_post_mult_value, sinkhorn_repeat, n_splits, mhc_mult, threads, hidden_block, num_stages
+    h_blks = sorted({math.gcd(hidden_size, candidate) for candidate in (256, 512, 1024)})
+    configs = []
+    for block in h_blks:
+        if block <= 0 or hidden_size % block != 0:
+            continue
+        for n_thr in (64, 96, 128):
+            for stages in (2, 3):
+                configs.append({'threads': n_thr, 'hidden_block': block, 'num_stages': stages})
+    return _dedupe_configs(configs)
+
+
+@tilelang.autotune(configs=_pre_big_fuse_configs, warmup=10, rep=20, timeout=60)
 @tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
-        tilelang.PassConfigKey.TL_DISABLE_VECTORIZE_256: True,
-    },
+    pass_configs=_PASS_CONFIGS,
 )
 def _mhc_pre_big_fuse(
     hidden_size: int,
@@ -21,15 +61,18 @@ def _mhc_pre_big_fuse(
     sinkhorn_repeat: int,
     n_splits: int = 16,
     mhc_mult: int = 4,
+    threads: int = 96,
+    hidden_block: int = 512,
+    num_stages: int = 2,
 ):
     num_tokens = T.dynamic('num_tokens')
     mhc_mult3 = mhc_mult * (2 + mhc_mult)
-    hidden_block = math.gcd(512, hidden_size)
+    hidden_block = math.gcd(hidden_block, hidden_size)
 
     @T.prim_func
     def mhc_pre_big_fuse(
-        gemm_out_mul: T.Tensor[(n_splits, num_tokens, mhc_mult3), T.float32],
-        gemm_out_sqrsum: T.Tensor[(n_splits, num_tokens), T.float32],
+        gemm_out_mul: T.Tensor[(num_tokens, n_splits, mhc_mult3), T.float32],
+        gemm_out_sqrsum: T.Tensor[(num_tokens, n_splits), T.float32],
         mhc_scale: T.Tensor[(3,), T.float32],
         mhc_base: T.Tensor[(mhc_mult3,), T.float32],
         residual: T.Tensor[(num_tokens, mhc_mult, hidden_size), T.bfloat16],
@@ -38,7 +81,7 @@ def _mhc_pre_big_fuse(
         comb_mix: T.Tensor[(num_tokens, mhc_mult * mhc_mult), T.float32],
         layer_input: T.Tensor[(num_tokens, hidden_size), T.bfloat16],
     ) -> None:
-        with T.Kernel(num_tokens, threads=96) as pid:
+        with T.Kernel(num_tokens, threads=threads) as pid:
             ##################################################################
             # _mhc_pre_norm_fn_fwd_norm
             mixes_shared = T.alloc_shared(mhc_mult3, T.float32)
@@ -48,12 +91,12 @@ def _mhc_pre_big_fuse(
                 T.clear(mixes)
                 rms[0] = 0
                 for i_split in T.serial(n_splits):
-                    rms[0] += gemm_out_sqrsum[i_split, pid]
+                    rms[0] += gemm_out_sqrsum[pid, i_split]
                 rms[0] = T.rsqrt(rms[0] / (mhc_mult * hidden_size) + rms_eps)
                 for j in T.Parallel(mhc_mult3):
                     mixes[j] = 0
                     for i_split in T.serial(n_splits):
-                        mixes[j] += gemm_out_mul[i_split, pid, j]
+                        mixes[j] += gemm_out_mul[pid, i_split, j]
                     mixes[j] *= rms[0]
                 T.copy(mixes, mixes_shared, disable_tma=True)
 
@@ -112,7 +155,7 @@ def _mhc_pre_big_fuse(
                     )
                 ###################################################################
                 # _mhc_pre_apply_mix_fwd
-                for i0_h in T.Pipelined(hidden_size // hidden_block, num_stages=2):
+                for i0_h in T.Pipelined(hidden_size // hidden_block, num_stages=num_stages):
                     xs = T.alloc_shared((mhc_mult, hidden_block), T.bfloat16)
                     xl = T.alloc_fragment((mhc_mult, hidden_block), T.float32)
                     T.copy(residual[pid, 0, i0_h * hidden_block], xs, disable_tma=True)

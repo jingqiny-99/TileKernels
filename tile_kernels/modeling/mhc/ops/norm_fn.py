@@ -1,4 +1,5 @@
 import torch
+from tilelang.autotuner import set_autotune_inputs
 from torch.utils.checkpoint import checkpoint
 
 from tile_kernels.mhc.norm_fn_kernel import (
@@ -10,6 +11,9 @@ from tile_kernels.mhc.norm_fn_kernel import (
     _mhc_pre_norm_fn_fwd_norm,
     round_to_tf32,
 )
+
+
+_BWD_MUL_AUTOTUNE_KEYS: set[tuple[int, int, int, str]] = set()
 
 
 class _MHCFnNormwMerge(torch.autograd.Function):
@@ -92,7 +96,13 @@ class MHCPreNormFn(torch.autograd.Function):
 
         fn = round_to_tf32(fn)
 
-        fwd_mul_kernel = _mhc_pre_norm_fn_fwd_mul(mhc_mult3, 1, mhc_hidden_size)
+        with set_autotune_inputs(
+            x.view(-1, mhc_hidden_size),
+            fn,
+            out_mul_splitted.view(-1, 1, mhc_mult3),
+            sqrsum_splitted.view(-1, 1),
+        ):
+            fwd_mul_kernel = _mhc_pre_norm_fn_fwd_mul(mhc_mult3, 1, mhc_hidden_size)
         fwd_mul_kernel(
             x.view(-1, mhc_hidden_size),
             fn,
@@ -104,13 +114,20 @@ class MHCPreNormFn(torch.autograd.Function):
         out_mul = torch.empty_like(out_mul_splitted[0])
         sqrsum = torch.empty_like(sqrsum_splitted[0])
 
-        fwd_norm_kernel = _mhc_pre_norm_fn_fwd_norm(
-            mhc_mult3,
-            1,
-            mhc_hidden_size,
-            norm_eps,
-            n_splits,
-        )
+        with set_autotune_inputs(
+            out_mul_splitted.view(n_splits, -1, 1, mhc_mult3),
+            sqrsum_splitted.view(n_splits, -1, 1),
+            out_mul.view(-1, 1, mhc_mult3),
+            sqrsum.view(-1, 1),
+            out.view(-1, mhc_mult3),
+        ):
+            fwd_norm_kernel = _mhc_pre_norm_fn_fwd_norm(
+                mhc_mult3,
+                1,
+                mhc_hidden_size,
+                norm_eps,
+                n_splits,
+            )
         fwd_norm_kernel(
             out_mul_splitted.view(n_splits, -1, 1, mhc_mult3),
             sqrsum_splitted.view(n_splits, -1, 1),
@@ -137,7 +154,14 @@ class MHCPreNormFn(torch.autograd.Function):
 
         out_mul_grad = torch.empty_like(out_mul)
         sqrsum_grad = torch.empty_like(sqrsum)
-        bwd_norm_kernel = _mhc_pre_norm_fn_bwd_norm(mhc_mult3, 1, mhc_hidden_size, norm_eps)
+        with set_autotune_inputs(
+            out_grad.view(-1, mhc_mult3),
+            out_mul.view(-1, 1, mhc_mult3),
+            sqrsum.view(-1, 1),
+            out_mul_grad.view(-1, 1, mhc_mult3),
+            sqrsum_grad.view(-1, 1),
+        ):
+            bwd_norm_kernel = _mhc_pre_norm_fn_bwd_norm(mhc_mult3, 1, mhc_hidden_size, norm_eps)
         bwd_norm_kernel(
             out_grad.view(-1, mhc_mult3),
             out_mul.view(-1, 1, mhc_mult3),
@@ -154,7 +178,21 @@ class MHCPreNormFn(torch.autograd.Function):
 
         out_mul_grad = round_to_tf32(out_mul_grad)
 
-        bwd_mul_kernel = _mhc_pre_norm_fn_bwd_mul(mhc_mult3, 1, mhc_hidden_size)
+        tune_key = (mhc_mult3, mhc_hidden_size, x.numel(), str(x.device))
+        if tune_key not in _BWD_MUL_AUTOTUNE_KEYS:
+            tune_x_grad = x_grad.clone()
+            with set_autotune_inputs(
+                out_mul_grad.view(-1, 1, mhc_mult3),
+                sqrsum_grad.view(-1, 1),
+                x.view(-1, mhc_hidden_size),
+                fn,
+                tune_x_grad.view(-1, mhc_hidden_size),
+                fn_grad,
+            ):
+                bwd_mul_kernel = _mhc_pre_norm_fn_bwd_mul(mhc_mult3, 1, mhc_hidden_size)
+            _BWD_MUL_AUTOTUNE_KEYS.add(tune_key)
+        else:
+            bwd_mul_kernel = _mhc_pre_norm_fn_bwd_mul(mhc_mult3, 1, mhc_hidden_size)
         bwd_mul_kernel(
             out_mul_grad.view(-1, 1, mhc_mult3),
             sqrsum_grad.view(-1, 1),
