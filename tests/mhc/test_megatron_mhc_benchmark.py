@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from contextlib import contextmanager
+import os
 
 import pytest
 import torch
@@ -8,8 +9,26 @@ import torch
 DEVICE = 'cuda'
 DTYPE = torch.bfloat16
 
+def _int_list_from_env(name: str, default: list[int]) -> list[int]:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    values = [int(part.strip()) for part in value.split(',') if part.strip()]
+    if not values:
+        raise ValueError(f'{name} must contain at least one integer')
+    if any(item <= 0 for item in values):
+        raise ValueError(f'{name} must contain positive integers')
+    return values
+
+
+_SEQLENS = _int_list_from_env('MHC_BENCH_SEQLENS', [1024, 2048, 4096, 8192])
+_BATCH_SIZES = _int_list_from_env('MHC_BENCH_BATCH_SIZES', [1, 4])
+_HIDDENS = _int_list_from_env('MHC_BENCH_HIDDENS', [4096, 7168])
 _CASES = [
-    (4096, 1, 4, 7168, 'megatron'),
+    (s, b, 4, hidden, f's{s}_b{b}_h{hidden}')
+    for hidden in _HIDDENS
+    for b in _BATCH_SIZES
+    for s in _SEQLENS
 ]
 _KERNEL_BACKENDS = ['tilelang', 'megatron_lm', 'mhc_bench_triton']
 _E2E_EXACT_BACKENDS = ['megatron_lm', 'mhc_bench_triton']
