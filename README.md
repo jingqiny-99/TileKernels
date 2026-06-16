@@ -50,10 +50,10 @@ pytest tests/transpose/test_transpose.py --run-benchmark # Correctness + Benchma
 ### Nsight Systems benchmark capture
 
 ```bash
-nsys profile --sample=none --cpuctxsw=none -t cuda-sw,nvtx \
-  --capture-range=cudaProfilerApi --capture-range-end=stop \
-  --cuda-graph-trace=node -f true -x true -o /path/to/UT-timeline \
-  pytest tests/mhc/test_megatron_mhc_benchmark.py --run-benchmark -m benchmark --nsys-capture
+./capture_mhc_timeline.sh smoke \
+  --source tilelang,megatron_lm,mhc_bench_triton \
+  --scope kernels \
+  --shape 4096,1,7168
 ```
 
 `--nsys-capture` starts one CUDA profiler API capture on the first benchmark
@@ -63,15 +63,21 @@ only if you intentionally want one capture range per `benchmark_timer()` call.
 Use `--nsys-no-nvtx` to disable NVTX labels. Timer defaults can be changed with
 `--tk-bench-backend`, `--tk-bench-warmup`, and `--tk-bench-rep`.
 
+The capture helper also accepts `--seqlens`, `--batches`, and `--hiddens`.
+Megatron-LM kernels are loaded from `MEGATRON_LM_PATH` or a neighboring
+`Megatron-LM` checkout; mhc_bench Triton kernels are loaded from
+`MHC_BENCH_PATH`, a neighboring `mhc_bench`, or the vendored copy.
+
 The JSONL benchmark output records logical benchmark latency. For per-CUDA-kernel
-time, read the generated Nsight Systems report:
+time, read the generated Nsight Systems stats files:
 
 ```bash
-nsys stats --report cuda_gpu_kern_sum /path/to/UT-timeline.nsys-rep
+less /path/to/mhc-three-backends-smoke-src-tilelang+megatron_lm+mhc_bench_triton-scope-kernels-shape-s4096-b1-h7168.cuda_gpu_kern_sum.txt
+less /path/to/mhc-three-backends-smoke-src-tilelang+megatron_lm+mhc_bench_triton-scope-kernels-shape-s4096-b1-h7168.cuda_gpu_trace.txt
 ```
 
-If your Nsight Systems version does not include GPU kernel rows with
-`-t cuda-sw,nvtx`, rerun the profile with `-t cuda,nvtx`.
+The helper defaults to `-t cuda,nvtx` so the exported stats include GPU kernel
+rows for per-kernel time analysis.
 
 ### Pressure test
 

@@ -50,6 +50,23 @@ def _ref_h_post_bda(
     return mixed + h_post.unsqueeze(-1) * x_bias.unsqueeze(2)
 
 
+def _ref_h_post_bda_megatron_lm(
+    h_res: torch.Tensor,
+    original_residual: torch.Tensor,
+    h_post: torch.Tensor,
+    x: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    s, b, n, hidden = original_residual.shape
+    mixed = torch.bmm(
+        h_res.view(s * b, n, n).transpose(1, 2),
+        original_residual.float().view(s * b, n, hidden),
+    )
+    mixed = mixed.view(s, b, n, hidden)
+    x_bias = x.float() if bias is None else x.float() + bias.float().view(1, 1, hidden)
+    return mixed + h_post.unsqueeze(-1) * x_bias.unsqueeze(2)
+
+
 def _ref_proj_rms_compute_h(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -72,6 +89,16 @@ def _ref_proj_rms_compute_h(
     )
     linear = proj.float() * scale.unsqueeze(0) / (r + eps) + bias.unsqueeze(0)
     return torch.cat([linear[:, :n].sigmoid(), linear[:, n : 2 * n].sigmoid() * 2, linear[:, 2 * n :]], dim=-1), r
+
+
+def _pack_proj_rms_compute_h_result(result: tuple[torch.Tensor, ...], n: int) -> tuple[torch.Tensor, torch.Tensor]:
+    if len(result) == 4:
+        h_pre, h_post, h_res, r = result
+        return torch.cat([h_pre, h_post, h_res], dim=-1), r
+    if len(result) == 2:
+        y, r = result
+        return y, r
+    raise AssertionError(f'proj_rms_compute_h returned {len(result)} tensors; expected 2 or 4')
 
 
 def _load_backend(name: str) -> dict[str, Callable]:
@@ -104,15 +131,17 @@ def _load_backend(name: str) -> dict[str, Callable]:
             'proj_rms_compute_h': mhc_bench_triton_fused_proj_rms_compute_h,
         }
     if name == 'megatron_lm':
-        from tile_kernels.modeling.mhc.ops import megatron_cutile
+        from tile_kernels.modeling.mhc.ops import megatron_lm_fused
 
-        if not megatron_cutile.is_cutile_available():
-            pytest.skip('cuTile not available')
+        try:
+            megatron_lm_fused.require_available()
+        except RuntimeError as exc:
+            pytest.skip(str(exc))
         return {
-            'sinkhorn': megatron_cutile.fused_sinkhorn,
-            'h_aggregate': megatron_cutile.fused_h_aggregate,
-            'h_post_bda': megatron_cutile.fused_h_post_bda,
-            'proj_rms_compute_h': megatron_cutile.fused_proj_rms_compute_h,
+            'sinkhorn': megatron_lm_fused.fused_sinkhorn,
+            'h_aggregate': megatron_lm_fused.fused_h_aggregate,
+            'h_post_bda': megatron_lm_fused.fused_h_post_bda,
+            'proj_rms_compute_h': megatron_lm_fused.fused_proj_rms_compute_h,
         }
     raise AssertionError(f'unknown backend: {name}')
 
@@ -182,7 +211,8 @@ def test_h_post_bda_matches_reference_and_preserves_mix_grad_dtype(backend: str,
         return out, (h_res.grad, residual.grad, h_post.grad, x.grad, bias.grad if bias is not None else None)
 
     out, grads = _run(fn)
-    ref, ref_grads = _run(_ref_h_post_bda)
+    ref_fn = _ref_h_post_bda_megatron_lm if backend == 'megatron_lm' else _ref_h_post_bda
+    ref, ref_grads = _run(ref_fn)
 
     torch.testing.assert_close(out.float(), ref.float(), atol=FWD_ATOL, rtol=FWD_RTOL)
     for actual, expected in zip(grads, ref_grads):
@@ -217,7 +247,10 @@ def test_proj_rms_compute_h_matches_reference(backend: str, hidden: int) -> None
         alpha_post = alpha_post_data.clone().requires_grad_()
         alpha_res = alpha_res_data.clone().requires_grad_()
         bias = bias_data.clone().requires_grad_()
-        y, r = call(x, weight, alpha_pre, alpha_post, alpha_res, bias, n, eps)
+        y, r = _pack_proj_rms_compute_h_result(
+            call(x, weight, alpha_pre, alpha_post, alpha_res, bias, n, eps),
+            n,
+        )
         torch.autograd.backward([y, r], [grad_y, grad_r])
         return y, r, (x.grad, weight.grad, alpha_pre.grad, alpha_post.grad, alpha_res.grad, bias.grad)
 

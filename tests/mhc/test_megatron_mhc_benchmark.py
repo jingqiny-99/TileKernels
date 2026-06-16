@@ -30,11 +30,100 @@ _CASES = [
     for b in _BATCH_SIZES
     for s in _SEQLENS
 ]
-_KERNEL_BACKENDS = ['tilelang', 'megatron_lm', 'mhc_bench_triton']
-_E2E_EXACT_BACKENDS = ['megatron_lm', 'mhc_bench_triton']
+_ALL_KERNEL_BACKENDS = ['tilelang', 'megatron_lm', 'mhc_bench_triton']
+_ALL_E2E_EXACT_BACKENDS = ['megatron_lm', 'mhc_bench_triton']
+_SOURCE_ALIASES = {
+    'all': _ALL_KERNEL_BACKENDS,
+    'tilelang': ['tilelang'],
+    'tl': ['tilelang'],
+    'megatron': ['megatron_lm'],
+    'megatron_lm': ['megatron_lm'],
+    'megatron-lm': ['megatron_lm'],
+    'mhc_bench': ['mhc_bench_triton'],
+    'mhc-bench': ['mhc_bench_triton'],
+    'mhc_bench_triton': ['mhc_bench_triton'],
+    'triton': ['mhc_bench_triton'],
+}
+_ALL_SCOPES = {
+    'sinkhorn',
+    'h_aggregate',
+    'h_post_bda',
+    'h_post_bda_fwd',
+    'proj_rms_compute_h',
+    'mhc_e2e',
+    'tilelang_e2e',
+    'tilelang_prework',
+    'megatron_unit_parity',
+}
+_SCOPE_ALIASES = {
+    'all': sorted(_ALL_SCOPES),
+    'kernels': [
+        'sinkhorn',
+        'h_aggregate',
+        'h_post_bda',
+        'h_post_bda_fwd',
+        'proj_rms_compute_h',
+        'megatron_unit_parity',
+    ],
+    'kernel': [
+        'sinkhorn',
+        'h_aggregate',
+        'h_post_bda',
+        'h_post_bda_fwd',
+        'proj_rms_compute_h',
+        'megatron_unit_parity',
+    ],
+    'e2e': ['mhc_e2e', 'tilelang_e2e'],
+    'prework': ['tilelang_prework'],
+    **{scope: [scope] for scope in _ALL_SCOPES},
+}
+_KERNEL_BACKENDS: list[str]
+_E2E_EXACT_BACKENDS: list[str]
 _E2E_PHASES = ['fwd', 'fwd_bwd']
 _SINKHORN_REPEAT = 10
 _EPS = 1e-6
+
+
+def _name_list_from_env(name: str, default: str, aliases: dict[str, list[str]]) -> list[str]:
+    value = os.environ.get(name, default)
+    selected: list[str] = []
+    for raw_part in value.split(','):
+        part = raw_part.strip().lower()
+        if not part:
+            continue
+        if part not in aliases:
+            valid = ', '.join(sorted(aliases))
+            raise ValueError(f'{name} contains unsupported value {part!r}; expected one of: {valid}')
+        for item in aliases[part]:
+            if item not in selected:
+                selected.append(item)
+    if not selected:
+        raise ValueError(f'{name} must select at least one value')
+    return selected
+
+
+_SELECTED_SOURCES = set(_name_list_from_env('MHC_BENCH_SOURCES', 'all', _SOURCE_ALIASES))
+_SELECTED_SCOPES = set(_name_list_from_env('MHC_BENCH_SCOPES', 'all', _SCOPE_ALIASES))
+_KERNEL_BACKENDS = [backend for backend in _ALL_KERNEL_BACKENDS if backend in _SELECTED_SOURCES]
+_E2E_EXACT_BACKENDS = [backend for backend in _ALL_E2E_EXACT_BACKENDS if backend in _SELECTED_SOURCES]
+
+
+def _scope_enabled(*scopes: str) -> bool:
+    return bool(_SELECTED_SCOPES.intersection(scopes))
+
+
+def _source_enabled(*sources: str) -> bool:
+    return bool(_SELECTED_SOURCES.intersection(sources))
+
+
+def _skip_unless_scope(*scopes: str) -> None:
+    if not _scope_enabled(*scopes):
+        pytest.skip(f'MHC benchmark scope disabled: {",".join(scopes)}')
+
+
+def _skip_unless_source(*sources: str) -> None:
+    if not _source_enabled(*sources):
+        pytest.skip(f'MHC benchmark source disabled: {",".join(sources)}')
 
 
 @pytest.fixture(autouse=True)
@@ -57,6 +146,19 @@ def _is_mhc_bench_triton(backend: str) -> bool:
 
 def _dtype_nbytes(dtype: torch.dtype) -> int:
     return torch.empty((), dtype=dtype).element_size()
+
+
+def _split_proj_rms_compute_h_result(
+    result: tuple[torch.Tensor, ...],
+    n: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if len(result) == 4:
+        h_pre, h_post, h_res, r = result
+        return h_pre, h_post, h_res, r
+    if len(result) == 2:
+        y, r = result
+        return y[:, :n], y[:, n : 2 * n], y[:, 2 * n :], r
+    raise AssertionError(f'proj_rms_compute_h returned {len(result)} tensors; expected 2 or 4')
 
 
 @contextmanager
@@ -92,22 +194,19 @@ def _load_backend(name: str) -> dict[str, Callable]:
             'proj_rms_compute_h': tilelang_fused_proj_rms_compute_h_approx,
         }
     if name == 'megatron_lm':
-        from tile_kernels.modeling.mhc.ops import megatron_cutile
+        from tile_kernels.modeling.mhc.ops import megatron_lm_fused
 
-        if not megatron_cutile.is_cutile_available():
-            pytest.skip('cuTile not available')
+        try:
+            megatron_lm_fused.require_available()
+        except RuntimeError as exc:
+            pytest.skip(str(exc))
         return {
-            'equivalence': {
-                'sinkhorn': 'megatron-exact',
-                'h_aggregate': 'megatron-exact',
-                'h_post_bda': 'megatron-exact',
-                'proj_rms_compute_h': 'megatron-exact',
-            },
-            'backend_detail': 'TileKernels Megatron-compatible cuTile wrapper',
-            'sinkhorn': megatron_cutile.fused_sinkhorn,
-            'h_aggregate': megatron_cutile.fused_h_aggregate,
-            'h_post_bda': megatron_cutile.fused_h_post_bda,
-            'proj_rms_compute_h': megatron_cutile.fused_proj_rms_compute_h,
+            'equivalence': megatron_lm_fused.EQUIVALENCE,
+            'backend_detail': megatron_lm_fused.backend_selection(),
+            'sinkhorn': megatron_lm_fused.fused_sinkhorn,
+            'h_aggregate': megatron_lm_fused.fused_h_aggregate,
+            'h_post_bda': megatron_lm_fused.fused_h_post_bda,
+            'proj_rms_compute_h': megatron_lm_fused.fused_proj_rms_compute_h,
         }
     if name == 'mhc_bench_triton':
         pytest.importorskip('triton')
@@ -147,7 +246,7 @@ def _run_exact_mhc_e2e(
     flat_residual = residual.reshape(tokens, n * hidden)
 
     with _nvtx_range('mhc_e2e::proj_rms_compute_h'):
-        y, _r = backend_impl['proj_rms_compute_h'](
+        proj_result = backend_impl['proj_rms_compute_h'](
             flat_residual,
             weight,
             alpha_pre,
@@ -157,10 +256,11 @@ def _run_exact_mhc_e2e(
             n,
             eps,
         )
-    with _nvtx_range('mhc_e2e::slice_mixes'):
-        h_pre = y[:, :n].view(s, b, n)
-        h_post = y[:, n : 2 * n].view(s, b, n)
-        h_res_logits = y[:, 2 * n :].view(s, b, n, n)
+    with _nvtx_range('mhc_e2e::split_mixes'):
+        h_pre_flat, h_post_flat, h_res_flat, _r = _split_proj_rms_compute_h_result(proj_result, n)
+        h_pre = h_pre_flat.view(s, b, n)
+        h_post = h_post_flat.view(s, b, n)
+        h_res_logits = h_res_flat.view(s, b, n, n)
     with _nvtx_range('mhc_e2e::sinkhorn'):
         h_res = backend_impl['sinkhorn'](h_res_logits, _SINKHORN_REPEAT, eps)
     with _nvtx_range('mhc_e2e::h_aggregate'):
@@ -187,7 +287,7 @@ def _run_mhc_bench_triton_native_mhc_e2e(
     flat_residual = residual.reshape(tokens, hidden * n)
 
     with _nvtx_range('mhc_e2e::proj_rms_compute_h'):
-        y, _r = backend_impl['proj_rms_compute_h'](
+        proj_result = backend_impl['proj_rms_compute_h'](
             flat_residual,
             weight,
             alpha_pre,
@@ -197,10 +297,11 @@ def _run_mhc_bench_triton_native_mhc_e2e(
             n,
             eps,
         )
-    with _nvtx_range('mhc_e2e::slice_mixes'):
-        h_pre = y[:, :n].view(s, b, n)
-        h_post = y[:, n : 2 * n].view(s, b, n)
-        h_res_logits = y[:, 2 * n :].view(s, b, n, n)
+    with _nvtx_range('mhc_e2e::split_mixes'):
+        h_pre_flat, h_post_flat, h_res_flat, _r = _split_proj_rms_compute_h_result(proj_result, n)
+        h_pre = h_pre_flat.view(s, b, n)
+        h_post = h_post_flat.view(s, b, n)
+        h_res_logits = h_res_flat.view(s, b, n, n)
     with _nvtx_range('mhc_e2e::sinkhorn'):
         h_res = backend_impl['sinkhorn'](h_res_logits, _SINKHORN_REPEAT, eps)
     with _nvtx_range('mhc_e2e::h_aggregate'):
@@ -256,6 +357,7 @@ def test_sinkhorn_benchmark(
     benchmark_record,
     benchmark_timer,
 ) -> None:
+    _skip_unless_scope('sinkhorn')
     del hidden
     backend_impl = _load_backend(backend)
     fn = backend_impl['sinkhorn']
@@ -297,6 +399,7 @@ def test_h_aggregate_benchmark(
     benchmark_record,
     benchmark_timer,
 ) -> None:
+    _skip_unless_scope('h_aggregate')
     backend_impl = _load_backend(backend)
     fn = backend_impl['h_aggregate']
     mix_dtype = _mix_dtype(backend)
@@ -346,6 +449,7 @@ def test_h_post_bda_benchmark(
     benchmark_record,
     benchmark_timer,
 ) -> None:
+    _skip_unless_scope('h_post_bda')
     backend_impl = _load_backend(backend)
     fn = backend_impl['h_post_bda']
     mix_dtype = _mix_dtype(backend)
@@ -407,6 +511,7 @@ def test_h_post_bda_fwd_benchmark(
     benchmark_record,
     benchmark_timer,
 ) -> None:
+    _skip_unless_scope('h_post_bda_fwd')
     backend_impl = _load_backend(backend)
     fn = backend_impl['h_post_bda']
     mix_dtype = _mix_dtype(backend)
@@ -454,6 +559,8 @@ def test_h_post_bda_megatron_unit_parity_benchmark(
     benchmark_record,
     benchmark_timer,
 ) -> None:
+    _skip_unless_source('megatron_lm')
+    _skip_unless_scope('megatron_unit_parity')
     backend_impl = _load_backend('megatron_lm')
     fn = backend_impl['h_post_bda']
 
@@ -496,6 +603,7 @@ def test_proj_rms_compute_h_benchmark(
     benchmark_record,
     benchmark_timer,
 ) -> None:
+    _skip_unless_scope('proj_rms_compute_h')
     backend_impl = _load_backend(backend)
     fn = backend_impl['proj_rms_compute_h']
     tokens = s * b
@@ -517,8 +625,16 @@ def test_proj_rms_compute_h_benchmark(
         alpha_post = alpha_post_data.clone().requires_grad_()
         alpha_res = alpha_res_data.clone().requires_grad_()
         bias = bias_data.clone().requires_grad_()
-        y, r = fn(x, weight, alpha_pre, alpha_post, alpha_res, bias, n, 1e-6)
-        torch.autograd.backward([y, r], [grad_y, grad_r])
+        result = fn(x, weight, alpha_pre, alpha_post, alpha_res, bias, n, 1e-6)
+        if len(result) == 4:
+            h_pre, h_post, h_res, r = result
+            torch.autograd.backward(
+                [h_pre, h_post, h_res, r],
+                [grad_y[:, :n], grad_y[:, n : 2 * n], grad_y[:, 2 * n :], grad_r],
+            )
+        else:
+            y, r = result
+            torch.autograd.backward([y, r], [grad_y, grad_r])
 
     bench_fn()
     time_us = benchmark_timer(bench_fn)
@@ -554,6 +670,7 @@ def test_mhc_e2e_exact_benchmark(
     benchmark_record,
     benchmark_timer,
 ) -> None:
+    _skip_unless_scope('mhc_e2e')
     backend_impl = _load_backend(backend)
     k = n * hidden
     out_features = n * n + 2 * n
@@ -639,6 +756,8 @@ def test_mhc_e2e_tilelang_native_benchmark(
     benchmark_record,
     benchmark_timer,
 ) -> None:
+    _skip_unless_source('tilelang')
+    _skip_unless_scope('tilelang_e2e')
     pytest.importorskip('tilelang')
     k = n * hidden
     out_features = n * n + 2 * n
@@ -716,6 +835,8 @@ def test_tilelang_prework_benchmark(
     benchmark_record,
     benchmark_timer,
 ) -> None:
+    _skip_unless_source('tilelang')
+    _skip_unless_scope('tilelang_prework')
     pytest.importorskip('tilelang')
     from tile_kernels.modeling.mhc.ops.pre_big_fuse import mhc_pre_big_fuse
 
