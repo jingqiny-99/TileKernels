@@ -88,22 +88,22 @@ def _load_backend(name: str) -> dict[str, Callable]:
             'h_aggregate': tilelang_fused_h_aggregate,
             'h_post_bda': tilelang_fused_h_post_bda,
         }
-    if name == 'triton':
+    if name == 'mhc_bench_triton':
         pytest.importorskip('triton')
-        from tile_kernels.modeling.mhc.ops.megatron_triton import (
-            triton_fused_h_aggregate,
-            triton_fused_h_post_bda,
-            triton_fused_proj_rms_compute_h,
-            triton_fused_sinkhorn,
+        from tile_kernels.modeling.mhc.ops.mhc_bench_triton import (
+            mhc_bench_triton_fused_h_aggregate,
+            mhc_bench_triton_fused_h_post_bda,
+            mhc_bench_triton_fused_proj_rms_compute_h,
+            mhc_bench_triton_fused_sinkhorn,
         )
 
         return {
-            'sinkhorn': triton_fused_sinkhorn,
-            'h_aggregate': triton_fused_h_aggregate,
-            'h_post_bda': triton_fused_h_post_bda,
-            'proj_rms_compute_h': triton_fused_proj_rms_compute_h,
+            'sinkhorn': mhc_bench_triton_fused_sinkhorn,
+            'h_aggregate': mhc_bench_triton_fused_h_aggregate,
+            'h_post_bda': mhc_bench_triton_fused_h_post_bda,
+            'proj_rms_compute_h': mhc_bench_triton_fused_proj_rms_compute_h,
         }
-    if name == 'cutile':
+    if name == 'megatron_lm':
         from tile_kernels.modeling.mhc.ops import megatron_cutile
 
         if not megatron_cutile.is_cutile_available():
@@ -117,7 +117,7 @@ def _load_backend(name: str) -> dict[str, Callable]:
     raise AssertionError(f'unknown backend: {name}')
 
 
-@pytest.mark.parametrize('backend', ['triton', 'cutile'])
+@pytest.mark.parametrize('backend', ['megatron_lm', 'mhc_bench_triton'])
 @pytest.mark.parametrize('shape,iters', [((2, 3, 4, 4), 5), ((1, 2, 4, 4), 10)])
 def test_megatron_sinkhorn_fwd_bwd(backend: str, shape: tuple[int, ...], iters: int) -> None:
     fn = _load_backend(backend)['sinkhorn']
@@ -137,7 +137,7 @@ def test_megatron_sinkhorn_fwd_bwd(backend: str, shape: tuple[int, ...], iters: 
     torch.testing.assert_close(inp.grad, ref_inp.grad, atol=BWD_ATOL, rtol=BWD_RTOL)
 
 
-@pytest.mark.parametrize('backend', ['tilelang', 'triton', 'cutile'])
+@pytest.mark.parametrize('backend', ['tilelang', 'megatron_lm', 'mhc_bench_triton'])
 def test_h_aggregate_matches_reference_and_preserves_mix_grad_dtype(backend: str) -> None:
     fn = _load_backend(backend)['h_aggregate']
     x_data = _rand(2, 3, 4, 128)
@@ -160,7 +160,7 @@ def test_h_aggregate_matches_reference_and_preserves_mix_grad_dtype(backend: str
     assert h.grad.dtype == h.dtype
 
 
-@pytest.mark.parametrize('backend', ['tilelang', 'triton', 'cutile'])
+@pytest.mark.parametrize('backend', ['tilelang', 'megatron_lm', 'mhc_bench_triton'])
 @pytest.mark.parametrize('with_bias', [False, True])
 def test_h_post_bda_matches_reference_and_preserves_mix_grad_dtype(backend: str, with_bias: bool) -> None:
     fn = _load_backend(backend)['h_post_bda']
@@ -194,7 +194,7 @@ def test_h_post_bda_matches_reference_and_preserves_mix_grad_dtype(backend: str,
     assert grads[2].dtype == h_post_data.dtype
 
 
-@pytest.mark.parametrize('backend', ['triton', 'cutile'])
+@pytest.mark.parametrize('backend', ['megatron_lm', 'mhc_bench_triton'])
 @pytest.mark.parametrize('hidden', [128, 8192])
 def test_proj_rms_compute_h_matches_reference(backend: str, hidden: int) -> None:
     fn = _load_backend(backend)['proj_rms_compute_h']

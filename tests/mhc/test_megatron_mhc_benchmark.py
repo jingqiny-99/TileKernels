@@ -11,8 +11,8 @@ DTYPE = torch.bfloat16
 _CASES = [
     (4096, 1, 4, 7168, 'megatron'),
 ]
-_KERNEL_BACKENDS = ['tilelang', 'torch_compile', 'triton', 'cutile']
-_E2E_EXACT_BACKENDS = ['torch_compile', 'triton', 'cutile']
+_KERNEL_BACKENDS = ['tilelang', 'megatron_lm', 'mhc_bench_triton']
+_E2E_EXACT_BACKENDS = ['megatron_lm', 'mhc_bench_triton']
 _E2E_PHASES = ['fwd', 'fwd_bwd']
 _SINKHORN_REPEAT = 10
 _EPS = 1e-6
@@ -30,6 +30,10 @@ def _rand(*shape: int, dtype: torch.dtype = DTYPE) -> torch.Tensor:
 
 def _mix_dtype(backend: str) -> torch.dtype:
     return torch.float32 if backend == 'tilelang' else DTYPE
+
+
+def _is_mhc_bench_triton(backend: str) -> bool:
+    return backend == 'mhc_bench_triton'
 
 
 def _dtype_nbytes(dtype: torch.dtype) -> int:
@@ -62,49 +66,13 @@ def _load_backend(name: str) -> dict[str, Callable]:
 
         return {
             'equivalence': EQUIVALENCE,
+            'backend_detail': 'TileKernels TileLang kernels',
             'sinkhorn': tilelang_fused_sinkhorn,
             'h_aggregate': tilelang_fused_h_aggregate,
             'h_post_bda': tilelang_fused_h_post_bda,
             'proj_rms_compute_h': tilelang_fused_proj_rms_compute_h_approx,
         }
-    if name == 'torch_compile':
-        from tile_kernels.modeling.mhc.ops.megatron_torch_compile import (
-            EQUIVALENCE,
-            torch_compile_fused_h_aggregate,
-            torch_compile_fused_h_post_bda,
-            torch_compile_fused_proj_rms_compute_h,
-            torch_compile_fused_sinkhorn,
-        )
-
-        return {
-            'equivalence': EQUIVALENCE,
-            'sinkhorn': torch_compile_fused_sinkhorn,
-            'h_aggregate': torch_compile_fused_h_aggregate,
-            'h_post_bda': torch_compile_fused_h_post_bda,
-            'proj_rms_compute_h': torch_compile_fused_proj_rms_compute_h,
-        }
-    if name == 'triton':
-        pytest.importorskip('triton')
-        from tile_kernels.modeling.mhc.ops.megatron_triton import (
-            triton_fused_h_aggregate,
-            triton_fused_h_post_bda,
-            triton_fused_proj_rms_compute_h,
-            triton_fused_sinkhorn,
-        )
-
-        return {
-            'equivalence': {
-                'sinkhorn': 'megatron-exact',
-                'h_aggregate': 'megatron-exact',
-                'h_post_bda': 'megatron-exact',
-                'proj_rms_compute_h': 'megatron-exact',
-            },
-            'sinkhorn': triton_fused_sinkhorn,
-            'h_aggregate': triton_fused_h_aggregate,
-            'h_post_bda': triton_fused_h_post_bda,
-            'proj_rms_compute_h': triton_fused_proj_rms_compute_h,
-        }
-    if name == 'cutile':
+    if name == 'megatron_lm':
         from tile_kernels.modeling.mhc.ops import megatron_cutile
 
         if not megatron_cutile.is_cutile_available():
@@ -116,10 +84,29 @@ def _load_backend(name: str) -> dict[str, Callable]:
                 'h_post_bda': 'megatron-exact',
                 'proj_rms_compute_h': 'megatron-exact',
             },
+            'backend_detail': 'TileKernels Megatron-compatible cuTile wrapper',
             'sinkhorn': megatron_cutile.fused_sinkhorn,
             'h_aggregate': megatron_cutile.fused_h_aggregate,
             'h_post_bda': megatron_cutile.fused_h_post_bda,
             'proj_rms_compute_h': megatron_cutile.fused_proj_rms_compute_h,
+        }
+    if name == 'mhc_bench_triton':
+        pytest.importorskip('triton')
+        from tile_kernels.modeling.mhc.ops.mhc_bench_triton import (
+            EQUIVALENCE,
+            mhc_bench_triton_fused_proj_rms_compute_h,
+            mhc_bench_triton_fused_sinkhorn,
+            mhc_bench_triton_native_h_aggregate,
+            mhc_bench_triton_native_h_post_bda,
+        )
+
+        return {
+            'equivalence': EQUIVALENCE,
+            'backend_detail': 'mhc_bench/triton_kernels native wrappers',
+            'sinkhorn': mhc_bench_triton_fused_sinkhorn,
+            'h_aggregate': mhc_bench_triton_native_h_aggregate,
+            'h_post_bda': mhc_bench_triton_native_h_post_bda,
+            'proj_rms_compute_h': mhc_bench_triton_fused_proj_rms_compute_h,
         }
     raise AssertionError(f'unknown backend: {name}')
 
@@ -139,6 +126,46 @@ def _run_exact_mhc_e2e(
     s, b, _, hidden = residual.shape
     tokens = s * b
     flat_residual = residual.reshape(tokens, n * hidden)
+
+    with _nvtx_range('mhc_e2e::proj_rms_compute_h'):
+        y, _r = backend_impl['proj_rms_compute_h'](
+            flat_residual,
+            weight,
+            alpha_pre,
+            alpha_post,
+            alpha_res,
+            bias,
+            n,
+            eps,
+        )
+    with _nvtx_range('mhc_e2e::slice_mixes'):
+        h_pre = y[:, :n].view(s, b, n)
+        h_post = y[:, n : 2 * n].view(s, b, n)
+        h_res_logits = y[:, 2 * n :].view(s, b, n, n)
+    with _nvtx_range('mhc_e2e::sinkhorn'):
+        h_res = backend_impl['sinkhorn'](h_res_logits, _SINKHORN_REPEAT, eps)
+    with _nvtx_range('mhc_e2e::h_aggregate'):
+        aggregated = backend_impl['h_aggregate'](residual, h_pre)
+    with _nvtx_range('mhc_e2e::h_post_bda'):
+        output = backend_impl['h_post_bda'](h_res, residual, h_post, aggregated, post_bias)
+    return aggregated, output
+
+
+def _run_mhc_bench_triton_native_mhc_e2e(
+    backend_impl: dict[str, Callable],
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    alpha_pre: torch.Tensor,
+    alpha_post: torch.Tensor,
+    alpha_res: torch.Tensor,
+    bias: torch.Tensor,
+    post_bias: torch.Tensor,
+    n: int,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    s, b, hidden, _ = residual.shape
+    tokens = s * b
+    flat_residual = residual.reshape(tokens, hidden * n)
 
     with _nvtx_range('mhc_e2e::proj_rms_compute_h'):
         y, _r = backend_impl['proj_rms_compute_h'](
@@ -231,6 +258,7 @@ def test_sinkhorn_benchmark(
         time_us=time_us,
         extras={
             'equivalence': backend_impl['equivalence']['sinkhorn'],
+            'backend_detail': backend_impl['backend_detail'],
             'grad': 'dense',
             'dtype': str(dtype).replace('torch.', ''),
         },
@@ -253,7 +281,10 @@ def test_h_aggregate_benchmark(
     backend_impl = _load_backend(backend)
     fn = backend_impl['h_aggregate']
     mix_dtype = _mix_dtype(backend)
-    x_data = _rand(s, b, n, hidden)
+    if _is_mhc_bench_triton(backend):
+        x_data = _rand(s, b, hidden, n)
+    else:
+        x_data = _rand(s, b, n, hidden)
     h_data = _rand(s, b, n, dtype=mix_dtype).sigmoid()
     grad = _rand(s, b, hidden)
 
@@ -275,7 +306,9 @@ def test_h_aggregate_benchmark(
         bandwidth_gbs=io_bytes / time_us / 1e3,
         extras={
             'equivalence': backend_impl['equivalence']['h_aggregate'],
+            'backend_detail': backend_impl['backend_detail'],
             'grad': 'dense',
+            'layout': 's,b,C,n' if _is_mhc_bench_triton(backend) else 's,b,n,C',
             'mix_dtype': str(mix_dtype).replace('torch.', ''),
         },
     )
@@ -298,11 +331,15 @@ def test_h_post_bda_benchmark(
     fn = backend_impl['h_post_bda']
     mix_dtype = _mix_dtype(backend)
     h_res_data = _rand(s, b, n, n, dtype=mix_dtype)
-    residual_data = _rand(s, b, n, hidden)
+    if _is_mhc_bench_triton(backend):
+        residual_data = _rand(s, b, hidden, n)
+        grad = _rand(s, b, hidden, n)
+    else:
+        residual_data = _rand(s, b, n, hidden)
+        grad = _rand(s, b, n, hidden)
     h_post_data = _rand(s, b, n, dtype=mix_dtype).sigmoid()
     x_data = _rand(s, b, hidden)
     bias_data = _rand(hidden)
-    grad = _rand(s, b, n, hidden)
 
     def bench_fn() -> None:
         h_res = h_res_data.clone().requires_grad_()
@@ -328,7 +365,9 @@ def test_h_post_bda_benchmark(
         bandwidth_gbs=io_bytes / time_us / 1e3,
         extras={
             'equivalence': backend_impl['equivalence']['h_post_bda'],
+            'backend_detail': backend_impl['backend_detail'],
             'grad': 'dense',
+            'layout': 's,b,C,n' if _is_mhc_bench_triton(backend) else 's,b,n,C',
             'mix_dtype': str(mix_dtype).replace('torch.', ''),
         },
     )
@@ -353,7 +392,7 @@ def test_h_post_bda_fwd_benchmark(
     fn = backend_impl['h_post_bda']
     mix_dtype = _mix_dtype(backend)
     h_res = _rand(s, b, n, n, dtype=mix_dtype)
-    residual = _rand(s, b, n, hidden)
+    residual = _rand(s, b, hidden, n) if _is_mhc_bench_triton(backend) else _rand(s, b, n, hidden)
     h_post = _rand(s, b, n, dtype=mix_dtype).sigmoid()
     x = _rand(s, b, hidden)
     bias = _rand(hidden) if with_bias else None
@@ -378,6 +417,8 @@ def test_h_post_bda_fwd_benchmark(
         bandwidth_gbs=io_bytes / time_us / 1e3,
         extras={
             'equivalence': backend_impl['equivalence']['h_post_bda'],
+            'backend_detail': backend_impl['backend_detail'],
+            'layout': 's,b,C,n' if _is_mhc_bench_triton(backend) else 's,b,n,C',
             'mix_dtype': str(mix_dtype).replace('torch.', ''),
         },
     )
@@ -394,7 +435,7 @@ def test_h_post_bda_megatron_unit_parity_benchmark(
     benchmark_record,
     benchmark_timer,
 ) -> None:
-    backend_impl = _load_backend('cutile')
+    backend_impl = _load_backend('megatron_lm')
     fn = backend_impl['h_post_bda']
 
     def bench_fn() -> None:
@@ -411,12 +452,13 @@ def test_h_post_bda_megatron_unit_parity_benchmark(
     io_bytes = n_tokens * (hidden * 2 + n * hidden * 2 * 2 + n * 2 + n * n * 2)
     benchmark_record(
         kernel='megatron_mhc_h_post_bda_unit_parity',
-        operation='cutile',
+        operation='megatron_lm',
         params={'case': case_name, 'bias': False, 'grad': 'sum', 's': s, 'b': b, 'n': n, 'hidden': hidden},
         time_us=time_us,
         bandwidth_gbs=io_bytes / time_us / 1e3,
         extras={
             'equivalence': 'matches Megatron-LM test_fused_mhc_kernels_bench.py',
+            'backend_detail': backend_impl['backend_detail'],
             'mix_dtype': str(DTYPE).replace('torch.', ''),
         },
     )
@@ -469,7 +511,9 @@ def test_proj_rms_compute_h_benchmark(
         time_us=time_us,
         extras={
             'equivalence': backend_impl['equivalence']['proj_rms_compute_h'],
+            'backend_detail': backend_impl['backend_detail'],
             'grad': 'dense',
+            'includes': 'projection+scale' if _is_mhc_bench_triton(backend) else 'proj_rms_compute_h',
             'param_dtype': str(DTYPE).replace('torch.', ''),
             'tflops': flops / time_us / 1e6,
         },
@@ -494,7 +538,10 @@ def test_mhc_e2e_exact_benchmark(
     backend_impl = _load_backend(backend)
     k = n * hidden
     out_features = n * n + 2 * n
-    residual_data = _rand(s, b, n, hidden)
+    if _is_mhc_bench_triton(backend):
+        residual_data = _rand(s, b, hidden, n)
+    else:
+        residual_data = _rand(s, b, n, hidden)
     weight_data = _rand(out_features, k)
     alpha_pre_data = _rand(1)
     alpha_post_data = _rand(1)
@@ -511,18 +558,32 @@ def test_mhc_e2e_exact_benchmark(
             alpha_res = alpha_res_data.clone().requires_grad_()
             bias = bias_data.clone().requires_grad_()
             post_bias = post_bias_data.clone().requires_grad_()
-            aggregated, output = _run_exact_mhc_e2e(
-                backend_impl,
-                residual,
-                weight,
-                alpha_pre,
-                alpha_post,
-                alpha_res,
-                bias,
-                post_bias,
-                n,
-                _EPS,
-            )
+            if _is_mhc_bench_triton(backend):
+                aggregated, output = _run_mhc_bench_triton_native_mhc_e2e(
+                    backend_impl,
+                    residual,
+                    weight,
+                    alpha_pre,
+                    alpha_post,
+                    alpha_res,
+                    bias,
+                    post_bias,
+                    n,
+                    _EPS,
+                )
+            else:
+                aggregated, output = _run_exact_mhc_e2e(
+                    backend_impl,
+                    residual,
+                    weight,
+                    alpha_pre,
+                    alpha_post,
+                    alpha_res,
+                    bias,
+                    post_bias,
+                    n,
+                    _EPS,
+                )
             if phase == 'fwd_bwd':
                 with _nvtx_range('mhc_e2e::backward'):
                     (output.sum() + aggregated.sum()).backward()
@@ -536,7 +597,10 @@ def test_mhc_e2e_exact_benchmark(
         time_us=time_us,
         extras={
             'equivalence': 'megatron-exact-simple-pipeline',
+            'backend_detail': backend_impl['backend_detail'],
             'fwd_grad_mode': 'enabled',
+            'layout': 's,b,C,n' if _is_mhc_bench_triton(backend) else 's,b,n,C',
+            'pre_path': 'projection+scale' if _is_mhc_bench_triton(backend) else 'proj_rms_compute_h',
             'sinkhorn_repeat': _SINKHORN_REPEAT,
             'sublayer': 'identity',
         },

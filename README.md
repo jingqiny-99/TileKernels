@@ -63,6 +63,16 @@ only if you intentionally want one capture range per `benchmark_timer()` call.
 Use `--nsys-no-nvtx` to disable NVTX labels. Timer defaults can be changed with
 `--tk-bench-backend`, `--tk-bench-warmup`, and `--tk-bench-rep`.
 
+The JSONL benchmark output records logical benchmark latency. For per-CUDA-kernel
+time, read the generated Nsight Systems report:
+
+```bash
+nsys stats --report cuda_gpu_kern_sum /path/to/UT-timeline.nsys-rep
+```
+
+If your Nsight Systems version does not include GPU kernel rows with
+`-t cuda-sw,nvtx`, rerun the profile with `-t cuda,nvtx`.
+
 ### Pressure test
 
 ```bash
