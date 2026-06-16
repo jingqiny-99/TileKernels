@@ -1,53 +1,71 @@
-# Tile Kernels
+# mHC Kernel Benchmarking
 
-Optimized GPU kernels for LLM operations, built with [TileLang](https://github.com/tile-ai/tilelang). TileLang is a domain-specific language for expressing high-performance GPU kernels in Python, featuring easy migration, agile development, and automatic optimization.
+This repository is based on the [TileKernels mHC implementation](https://github.com/deepseek-ai/TileKernels/tree/main/tile_kernels/mhc) and extends the benchmark coverage with mHC kernels from the Megatron-LM dev branch and the [mhc_bench](https://github.com/kainzhong/mhc_bench/tree/main) Triton implementation.
 
-Most kernels in this project approach the limit of hardware performance regarding the compute intensity and memory bandwidth. Some of them have already been used in internal training and inference scenarios. However, they do not represent best practices and we are actively working on improving the code quality and documentation.
+The mHC benchmark compares three kernel sources:
 
-## Features
+- **TE (Triton)** — Triton kernels from `mhc_bench`
+- **Megatron-LM (cuTile + Triton)** — fused mHC kernels from the Megatron-LM dev branch
+- **TileKernels (TileLang)** — TileLang kernels from TileKernels
 
-- **Gating** — Top-k expert selection and scoring for Mixture of Experts routing
-- **MoE Routing** — Token-to-expert mapping, fused expansion/reduction and weight normalization
-- **Quantization** — Per-token, per-block, and per-channel FP8/FP4/E5M6 casting with fused SwiGLU+quantization ops
-- **Transpose** — Batched transpose operations
-- **Engram** — Engram gating kernels with fused RMSNorm, forward/backward passes and weight gradient reduction
-- **Manifold HyperConnection** — Hyper-connection kernels including Sinkhorn normalization and mix splitting/application
-- **Modeling** — High-level `torch.autograd.Function` wrappers composing low-level kernels into trainable layers (engram gate, mHC pipeline)
+Autotuning is enabled for the TileKernels mHC kernels and for the Megatron-LM dev-branch mHC kernels before collecting the benchmark results below.
 
-## Requirements
+### GB200 Cluster Results
 
-- Python 3.10 or higher
-- PyTorch 2.10 or higher
-- TileLang 0.1.9 or higher
-- NVIDIA SM90 or SM100 architecture GPU
-- CUDA Toolkit 13.1 or higher
+All latencies are measured on a GB200 cluster after autotuning. Units are microseconds. These benchmark results are collected with the scripts in this repository and report Nsight GPU kernel time only, excluding GPU bubbles and kernel launch latency.
 
-## Installation
+#### `s*b=4096, h=7168, n=4`
 
-### Install a local development version
 
-```bash
-pip install -e ".[dev]"
-```
+| Kernel            | TE (Triton) | Megatron-LM (cuTile + Triton) | TileKernels (TileLang) | Hint                                                                 |
+| ----------------- | ----------- | ----------------------------- | ---------------------- | -------------------------------------------------------------------- |
+| pre_mix (fwd)     | 44          | 42                            | 41                     |                                                                      |
+| pre_mix (bwd)     | 85          | 83                            | 112                    |                                                                      |
+| mhc_post (fwd)    | 74          | 80                            | 78                     |                                                                      |
+| mhc_post (bwd)    | 187         | 183                           | 200                    |                                                                      |
+| proj+reduce (fwd) | 81          | 61                            | 96                     | So many small kernels in TE's proj + reduce impl                     |
+| proj+reduce (bwd) | 170         | 169                           | 425                    | Try to apply auto-tune for tilelang proj+reduce kernels, but failed. |
+| sinkhorn (fwd)    | 4.5         | 4.6                           | 7.8                    |                                                                      |
+| sinkhorn (bwd)    | 9.5         | 7                             | 12.3                   |                                                                      |
+| fwd sum           | 203.5       | 187.6                         | 222.8                  |                                                                      |
+| bwd sum           | 451.5       | 442                           | 749.3                  |                                                                      |
 
-### Install a release version
 
-```bash
-pip install tile-kernels
-```
+#### `s*b=4096, h=4096, n=4`
 
-## Testing
+Sinkhorn is omitted because it is the same as the `h=7168` case. Units are microseconds.
 
-Tests using pytest:
 
-### Test single test file
+| Kernel                 | TE (Triton) | Megatron-LM (cuTile + Triton) | TileKernels (TileLang) | Hint |
+| ---------------------- | ----------- | ----------------------------- | ---------------------- | ---- |
+| pre_mix (fwd)          | 25          | 23                            | 26                     |      |
+| pre_mix (bwd)          | 49          | 55                            | 66                     |      |
+| mhc_post (fwd)         | 43          | 47                            | 47                     |      |
+| mhc_post (bwd)         | 110         | 111                           | 123                    |      |
+| proj+reduce (fwd)      | 46          | 41                            | 57                     |      |
+| proj+reduce (bwd)      | 122         | 99                            | 370                    |      |
+| fwd sum (w/o sinkhorn) | 114         | 111                           | 130                    |      |
+| bwd sum (w/o sinkhorn) | 281         | 265                           | 559                    |      |
 
-```bash
-pytest tests/transpose/test_transpose.py -n 4 # Correctness only with 4 workers
-pytest tests/transpose/test_transpose.py --run-benchmark # Correctness + Benchmarking
-```
 
-### Nsight Systems benchmark capture
+#### `s*b=16384, h=7168, n=4`
+
+
+| Kernel            | TE (Triton) | Megatron-LM (cuTile + Triton) | TileKernels (TileLang) | Hint |
+| ----------------- | ----------- | ----------------------------- | ---------------------- | ---- |
+| pre_mix (fwd)     | 165         | 167                           | 165                    |      |
+| pre_mix (bwd)     | 330         | 314                           | 427                    |      |
+| mhc_post (fwd)    | 292         | 311                           | 299                    |      |
+| mhc_post (bwd)    | 737         | 651                           | 761                    |      |
+| proj+reduce (fwd) | 187         | 209                           | 321                    |      |
+| proj+reduce (bwd) | 560         | 592                           | 1634                   |      |
+| sinkhorn (fwd)    | 7.2         | 11                            | 15.3                   |      |
+| sinkhorn (bwd)    | 11.8        | 18.6                          | 24.1                   |      |
+| fwd sum           | 651.2       | 698                           | 800.3                  |      |
+| bwd sum           | 1638.8      | 1575.6                        | 2846.1                 |      |
+
+
+## Nsight Systems Capture
 
 ```bash
 ./capture_mhc_timeline.sh smoke \
@@ -56,65 +74,3 @@ pytest tests/transpose/test_transpose.py --run-benchmark # Correctness + Benchma
   --shape 4096,1,7168
 ```
 
-`--nsys-capture` starts one CUDA profiler API capture on the first benchmark
-timing region and stops it at pytest session finish, so the command generates
-one timeline with per-benchmark NVTX ranges. Use `--nsys-capture-mode=timer`
-only if you intentionally want one capture range per `benchmark_timer()` call.
-Use `--nsys-no-nvtx` to disable NVTX labels. Timer defaults can be changed with
-`--tk-bench-backend`, `--tk-bench-warmup`, and `--tk-bench-rep`.
-
-The capture helper also accepts `--seqlens`, `--batches`, and `--hiddens`.
-Megatron-LM kernels are loaded from `MEGATRON_LM_PATH` or a neighboring
-`Megatron-LM` checkout; mhc_bench Triton kernels are loaded from
-`MHC_BENCH_PATH`, a neighboring `mhc_bench`, or the vendored copy.
-
-The JSONL benchmark output records logical benchmark latency. For per-CUDA-kernel
-time, read the generated Nsight Systems stats files:
-
-```bash
-less /path/to/mhc-three-backends-smoke-src-tilelang+megatron_lm+mhc_bench_triton-scope-kernels-shape-s4096-b1-h7168.cuda_gpu_kern_sum.txt
-less /path/to/mhc-three-backends-smoke-src-tilelang+megatron_lm+mhc_bench_triton-scope-kernels-shape-s4096-b1-h7168.cuda_gpu_trace.txt
-```
-
-The helper defaults to `-t cuda,nvtx` so the exported stats include GPU kernel
-rows for per-kernel time analysis.
-
-### Pressure test
-
-```bash
-TK_FULL_TEST=1 pytest -n 4 --count 2
-```
-
-## Project Structure
-
-```txt
-tile_kernels/
-├── moe/        # Mixture of Experts routing related kernels
-├── quant/      # FP8/FP4/E5M6 quantization
-├── transpose/  # Batched transpose
-├── engram/     # Engram gating kernels
-├── mhc/        # Manifold HyperConnection kernels
-├── modeling/   # High-level autograd modeling layers (engram, mHC)
-├── torch/      # PyTorch reference implementations
-└── testing/    # Test and benchmark utilities
-```
-
-## Acknowledgement
-
-This project is built on [TileLang](https://github.com/tile-ai/tilelang). Thanks and respect to the developers!
-
-## License
-
-This code repository is released under [the MIT License](LICENSE).
-
-## Citation
-
-```bibtex
-@misc{tilekernels,
-      title={TileKernels},
-      author={Xiangwen Wang, Chenhao Xu, Huanqi Cao, Rui Tian, Weilin Zhao, Kuai Yu and Chenggang Zhao},
-      year={2026},
-      publisher = {GitHub},
-      howpublished = {\url{https://github.com/deepseek-ai/TileKernels}},
-}
-```
