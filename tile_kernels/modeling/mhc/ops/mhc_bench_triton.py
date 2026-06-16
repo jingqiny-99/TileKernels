@@ -1,9 +1,10 @@
-"""Adapters for the Triton mHC kernels from the sibling ``mhc_bench`` repo.
+"""Adapters for the Triton mHC kernels from ``mhc_bench``.
 
 The benchmark-facing helpers keep the mhc_bench native layout so Nsight
 timelines measure kernel work instead of layout conversion. The compat helpers
 present the existing Megatron-compatible TileKernels signatures for correctness
-tests.
+tests. If ``MHC_BENCH_PATH`` or a nearby ``mhc_bench`` checkout is unavailable,
+the vendored copy under this package is used.
 """
 
 from pathlib import Path
@@ -24,11 +25,31 @@ EQUIVALENCE = {
 _MHC_BENCH_OPS: ModuleType | None = None
 
 
-def _mhc_bench_root() -> Path:
+def _is_mhc_bench_root(path: Path) -> bool:
+    return (path / 'triton_kernels' / 'mhc_ops.py').exists()
+
+
+def _mhc_bench_root() -> Path | None:
     configured = os.environ.get('MHC_BENCH_PATH')
     if configured:
-        return Path(configured).expanduser().resolve()
-    return Path(__file__).resolve().parents[5] / 'mhc_bench'
+        root = Path(configured).expanduser().resolve()
+        if not _is_mhc_bench_root(root):
+            raise RuntimeError(
+                f'MHC_BENCH_PATH={root} does not contain triton_kernels/mhc_ops.py.'
+            )
+        return root
+
+    this_file = Path(__file__).resolve()
+    candidates = [
+        this_file.parents[5] / 'mhc_bench',
+        this_file.parents[4] / 'mhc_bench',
+        Path.cwd() / 'mhc_bench',
+        Path.cwd().parent / 'mhc_bench',
+    ]
+    for root in candidates:
+        if _is_mhc_bench_root(root):
+            return root.resolve()
+    return None
 
 
 def _load_mhc_bench_ops() -> ModuleType:
@@ -37,16 +58,13 @@ def _load_mhc_bench_ops() -> ModuleType:
         return _MHC_BENCH_OPS
 
     root = _mhc_bench_root()
-    if not (root / 'triton_kernels' / 'mhc_ops.py').exists():
-        raise RuntimeError(
-            f'mhc_bench Triton kernels were not found at {root}. '
-            'Set MHC_BENCH_PATH to the mhc_bench checkout.'
-        )
-    root_str = str(root)
-    if root_str not in sys.path:
-        sys.path.insert(0, root_str)
-
-    from triton_kernels import mhc_ops
+    if root is None:
+        from .mhc_bench_triton_kernels import mhc_ops
+    else:
+        root_str = str(root)
+        if root_str not in sys.path:
+            sys.path.insert(0, root_str)
+        from triton_kernels import mhc_ops
 
     _MHC_BENCH_OPS = mhc_ops
     return mhc_ops

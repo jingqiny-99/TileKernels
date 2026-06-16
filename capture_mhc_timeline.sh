@@ -18,6 +18,7 @@ Shape options:
 
 Other options:
   --out-dir DIR        Output directory. Default: $PROJECT_ROOT/../mHC-results.
+  --mhc-bench-path DIR Use an external mhc_bench checkout instead of vendored kernels.
   --trace TRACE        Nsight trace set. Default: cuda,nvtx.
   --pytest-bin BIN     Pytest executable. Default: pytest.
   -h, --help           Show this help.
@@ -25,6 +26,7 @@ Other options:
 Environment overrides:
   PROJECT_ROOT         Project root. Default: directory containing this script.
   OUT_DIR              Same as --out-dir.
+  MHC_BENCH_PATH       Same as --mhc-bench-path.
   TRACE                Same as --trace.
   PYTEST_BIN           Same as --pytest-bin.
 USAGE
@@ -36,6 +38,7 @@ SEQLENS="${MHC_BENCH_SEQLENS:-}"
 BATCHES="${MHC_BENCH_BATCH_SIZES:-}"
 HIDDENS="${MHC_BENCH_HIDDENS:-}"
 OUT_DIR_ARG="${OUT_DIR:-}"
+MHC_BENCH_PATH_ARG="${MHC_BENCH_PATH:-}"
 TRACE="${TRACE:-cuda,nvtx}"
 PYTEST_BIN="${PYTEST_BIN:-pytest}"
 
@@ -93,6 +96,14 @@ while [[ $# -gt 0 ]]; do
       OUT_DIR_ARG="$2"
       shift 2
       ;;
+    --mhc-bench-path)
+      if [[ $# -lt 2 ]]; then
+        echo "--mhc-bench-path requires a directory" >&2
+        exit 2
+      fi
+      MHC_BENCH_PATH_ARG="$2"
+      shift 2
+      ;;
     --trace)
       if [[ $# -lt 2 ]]; then
         echo "--trace requires a trace set" >&2
@@ -136,6 +147,9 @@ fi
 if [[ -n "${HIDDENS}" ]]; then
   export MHC_BENCH_HIDDENS="${HIDDENS}"
 fi
+if [[ -n "${MHC_BENCH_PATH_ARG}" ]]; then
+  export MHC_BENCH_PATH="${MHC_BENCH_PATH_ARG}"
+fi
 
 case "${MODE}" in
   full)
@@ -156,6 +170,7 @@ echo "Project root: ${PROJECT_ROOT}"
 echo "Output prefix: ${OUT_PREFIX}"
 echo "Trace: ${TRACE}"
 echo "Shapes: seqlens=${MHC_BENCH_SEQLENS:-default}, batches=${MHC_BENCH_BATCH_SIZES:-default}, hiddens=${MHC_BENCH_HIDDENS:-default}"
+echo "MHC_BENCH_PATH: ${MHC_BENCH_PATH:-vendored}"
 
 nsys profile --sample=none --cpuctxsw=none -t "${TRACE}" \
   --capture-range=cudaProfilerApi --capture-range-end=stop \
